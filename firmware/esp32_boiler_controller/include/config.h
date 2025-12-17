@@ -314,6 +314,51 @@ typedef struct {
 #define MAX_SCHEDULE_ENTRIES        12
 
 // ============================================================================
+// FUZZY LOGIC CONFIGURATION STRUCTURE
+// ============================================================================
+
+typedef struct {
+    bool enabled;                   // Enable fuzzy logic control
+
+    // Setpoints (center of "Normal" membership function)
+    float cond_setpoint;            // Target conductivity (µS/cm)
+    float alk_setpoint;             // Target alkalinity (ppm CaCO3)
+    float sulfite_setpoint;         // Target sulfite (ppm SO3)
+    float ph_setpoint;              // Target pH
+
+    // Deadbands (no action within this range)
+    float cond_deadband;            // ±µS/cm around setpoint
+    float alk_deadband;             // ±ppm
+    float sulfite_deadband;         // ±ppm
+    float ph_deadband;              // ±pH units
+
+    // Output scaling (maps 100% output to physical limits)
+    float blowdown_max_sec;         // Max blowdown per cycle (seconds)
+    float caustic_max_ml_min;       // Max NaOH pump rate (ml/min)
+    float sulfite_max_ml_min;       // Max sulfite pump rate (ml/min)
+    float acid_max_ml_min;          // Max acid pump rate (ml/min)
+
+    // Control behavior
+    bool aggressive_mode;           // Faster response, narrower deadbands
+    uint8_t inference_method;       // 0=Mamdani, 1=Sugeno
+    uint8_t defuzz_method;          // 0=Centroid, 1=Bisector, 2=MOM
+
+    // Manual test input validity timeout (minutes, 0=never expire)
+    uint16_t manual_input_timeout;
+} fuzzy_config_t;
+
+// Fuzzy config defaults
+#define FUZZY_DEFAULT_COND_SETPOINT     2500.0f     // µS/cm
+#define FUZZY_DEFAULT_ALK_SETPOINT      300.0f      // ppm
+#define FUZZY_DEFAULT_SULFITE_SETPOINT  30.0f       // ppm
+#define FUZZY_DEFAULT_PH_SETPOINT       11.0f
+
+#define FUZZY_DEFAULT_COND_DEADBAND     200.0f      // µS/cm
+#define FUZZY_DEFAULT_ALK_DEADBAND      50.0f       // ppm
+#define FUZZY_DEFAULT_SULFITE_DEADBAND  5.0f        // ppm
+#define FUZZY_DEFAULT_PH_DEADBAND       0.3f
+
+// ============================================================================
 // SYSTEM CONFIGURATION STRUCTURE (Main Config)
 // ============================================================================
 
@@ -330,6 +375,7 @@ typedef struct {
     water_meter_config_t meters[2]; // WM1, WM2
     alarm_config_t alarms;
     feed_schedule_entry_t schedules[MAX_SCHEDULE_ENTRIES];
+    fuzzy_config_t fuzzy;           // Fuzzy logic control settings
 
     // Network configuration
     char wifi_ssid[WIFI_SSID_MAX_LEN];
