@@ -130,9 +130,11 @@ public:
      * @param blowdown_time_ms Accumulated blowdown time
      * @param water_contacts Number of water meter contacts since last check
      * @param water_volume Volume from paddlewheel since last check
+     * @param fuzzy_rate Fuzzy logic output rate (0-100%)
      */
     void processFeedMode(bool blowdown_active, uint32_t blowdown_time_ms,
-                        uint32_t water_contacts, float water_volume);
+                        uint32_t water_contacts, float water_volume,
+                        float fuzzy_rate = 0.0f);
 
     /**
      * @brief Process scheduled feed
@@ -244,6 +246,7 @@ private:
     void processModeC();
     void processModeD(uint32_t water_contacts);
     void processModeE(float water_volume);
+    void processModeF(float water_volume, float fuzzy_rate);
     void checkTimeout();
     void updateStats();
 };
@@ -278,9 +281,11 @@ public:
 
     /**
      * @brief Process feed modes for all pumps
+     * @param fuzzy_rates Array of fuzzy outputs [0]=H2SO3/acid, [1]=NaOH/caustic, [2]=Amine/sulfite
      */
     void processFeedModes(bool blowdown_active, uint32_t blowdown_time_ms,
-                         uint32_t water_contacts, float water_volume);
+                         uint32_t water_contacts, float water_volume,
+                         float fuzzy_rates[PUMP_COUNT] = nullptr);
 
     /**
      * @brief Enable/disable all pumps

@@ -190,7 +190,8 @@ hoa_mode_t ChemicalPump::getHOA() {
 }
 
 void ChemicalPump::processFeedMode(bool blowdown_active, uint32_t blowdown_time_ms,
-                                   uint32_t water_contacts, float water_volume) {
+                                   uint32_t water_contacts, float water_volume,
+                                   float fuzzy_rate) {
     if (!_status.enabled || !_config) return;
     if (_status.hoa_mode != HOA_AUTO) return;
 
@@ -209,6 +210,9 @@ void ChemicalPump::processFeedMode(bool blowdown_active, uint32_t blowdown_time_
             break;
         case FEED_MODE_E_PADDLEWHEEL:
             processModeE(water_volume);
+            break;
+        case FEED_MODE_F_FUZZY:
+            processModeF(water_volume, fuzzy_rate);
             break;
         case FEED_MODE_DISABLED:
         default:
@@ -465,6 +469,37 @@ void ChemicalPump::processModeE(float water_volume) {
     }
 }
 
+void ChemicalPump::processModeF(float water_volume, float fuzzy_rate) {
+    // Mode F: Fuzzy logic controlled dosing proportional to makeup water
+    //
+    // Dosing calculation:
+    //   ml_to_dose = water_volume * ml_per_gallon_at_100pct * (fuzzy_rate / 100.0)
+    //
+    // Example: 16 gal boiler, 25 gal feedwater tank, 1 pulse/gallon meter
+    //   If fuzzy_rate = 50% and 1 gallon makeup water and ml_per_gallon_at_100pct = 2.0 ml
+    //   Then dose = 1.0 * 2.0 * 0.50 = 1.0 ml
+    //
+    // This ensures dosing is proportional to both water usage AND fuzzy output
+
+    if (water_volume <= 0 || fuzzy_rate <= 0) {
+        return;  // No water or fuzzy says no dosing needed
+    }
+
+    // Calculate ml to dose based on fuzzy rate and water volume
+    float ml_to_dose = water_volume * _config->ml_per_gallon_at_100pct * (fuzzy_rate / 100.0f);
+
+    if (ml_to_dose < 0.01f) {
+        return;  // Below minimum dose threshold
+    }
+
+    // Start pump for the calculated volume
+    if (!_status.running) {
+        start(0, ml_to_dose);
+        Serial.printf("Pump %s: Mode F dosing %.2f ml (water=%.2f gal, fuzzy=%.1f%%)\n",
+                      _name, ml_to_dose, water_volume, fuzzy_rate);
+    }
+}
+
 void ChemicalPump::checkTimeout() {
     if (!_config || !_status.running) return;
 
@@ -542,12 +577,14 @@ void PumpManager::update() {
 }
 
 void PumpManager::processFeedModes(bool blowdown_active, uint32_t blowdown_time_ms,
-                                   uint32_t water_contacts, float water_volume) {
+                                   uint32_t water_contacts, float water_volume,
+                                   float fuzzy_rates[PUMP_COUNT]) {
     if (_emergency_stop) return;
 
     for (int i = 0; i < PUMP_COUNT; i++) {
+        float rate = (fuzzy_rates != nullptr) ? fuzzy_rates[i] : 0.0f;
         _pumps[i]->processFeedMode(blowdown_active, blowdown_time_ms,
-                                   water_contacts, water_volume);
+                                   water_contacts, water_volume, rate);
     }
 }
 

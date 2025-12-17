@@ -91,7 +91,8 @@ typedef enum {
     FEED_MODE_C_PERCENT_TIME = 3,       // Continuous duty cycle
     FEED_MODE_D_WATER_CONTACT = 4,      // Triggered by water meter contacts
     FEED_MODE_E_PADDLEWHEEL = 5,        // Triggered by paddlewheel volume
-    FEED_MODE_S_SCHEDULED = 6           // Time-of-day scheduled feed
+    FEED_MODE_S_SCHEDULED = 6,          // Time-of-day scheduled feed
+    FEED_MODE_F_FUZZY = 7               // Fuzzy logic controlled (proportional to makeup water)
 } feed_mode_t;
 
 // Feed Timing Limits
@@ -220,6 +221,10 @@ typedef struct {
     // Mode E: Paddlewheel
     uint16_t time_per_volume_ms;    // Feed time per volume unit (milliseconds)
     uint16_t volume_to_initiate;    // Volume units to trigger feed
+
+    // Mode F: Fuzzy Logic (proportional to makeup water)
+    float ml_per_gallon_at_100pct;  // ml chemical per gallon makeup at 100% fuzzy output
+    uint8_t fuzzy_meter_select;     // Water meter: 0=WM1, 1=WM2, 2=Both
 
     // Common limits
     uint16_t time_limit_seconds;    // Maximum accumulated feed time

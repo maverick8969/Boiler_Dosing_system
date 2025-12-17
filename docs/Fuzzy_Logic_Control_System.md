@@ -264,28 +264,83 @@ FUZZY CONTROL
 
 ## Integration with Pump Control
 
-The fuzzy output (0-100%) is converted to actual pump operation for chemical dosing:
+### Feed Mode F: Fuzzy Logic Control
+
+The system supports **Feed Mode F** which combines fuzzy logic output with makeup water volume for proportional chemical dosing. This mode is selected per-pump in the configuration.
+
+**How Mode F Works:**
+
+```
+Chemical Dose = Water Volume × ml_per_gallon_at_100pct × (Fuzzy Rate / 100%)
+```
+
+**Example with your system (16 gal boiler, 25 gal feedwater, 1 pulse/gallon):**
+- Water meter counts 1 gallon of makeup water
+- Fuzzy logic output for sulfite = 50%
+- `ml_per_gallon_at_100pct` = 2.0 ml
+- Dose = 1.0 gal × 2.0 ml × 0.50 = **1.0 ml sulfite**
+
+This ensures dosing is proportional to BOTH:
+1. Actual makeup water consumption (from water meter)
+2. Fuzzy logic assessment of chemical need
+
+### Configuration Parameters (per pump)
+
+```cpp
+typedef struct {
+    // ... other mode parameters ...
+
+    // Mode F: Fuzzy Logic (proportional to makeup water)
+    float ml_per_gallon_at_100pct;  // ml chemical per gallon at 100% fuzzy output
+    uint8_t fuzzy_meter_select;     // Water meter: 0=WM1, 1=WM2, 2=Both
+} pump_config_t;
+```
+
+### Feed Mode Selection
+
+| Feed Mode | Description | Use Case |
+|-----------|-------------|----------|
+| A | Blowdown + Feed | Feed during blowdown cycle |
+| B | % of Blowdown | Feed proportional to blowdown duration |
+| C | % of Time | Continuous duty cycle |
+| D | Water Contact | Feed per water meter pulse |
+| E | Paddlewheel | Feed per volume measured |
+| **F** | **Fuzzy Logic** | **Intelligent dosing based on water chemistry** |
+| S | Scheduled | Time-of-day scheduled feed |
+
+### Mode F Implementation
 
 ```cpp
 // In chemical_pump.cpp
-void applyFuzzyOutput(fuzzy_result_t& result) {
-    // Caustic pump (NaOH)
-    float caustic_ml_min = result.caustic_rate * config.caustic_max_ml_min / 100.0f;
-    pump_naoh.setFlowRate(caustic_ml_min);
+void ChemicalPump::processModeF(float water_volume, float fuzzy_rate) {
+    // Mode F: Fuzzy logic controlled dosing proportional to makeup water
 
-    // Sulfite pump
-    float sulfite_ml_min = result.sulfite_rate * config.sulfite_max_ml_min / 100.0f;
-    pump_sulfite.setFlowRate(sulfite_ml_min);
+    if (water_volume <= 0 || fuzzy_rate <= 0) {
+        return;  // No water or fuzzy says no dosing needed
+    }
 
-    // Acid pump
-    float acid_ml_min = result.acid_rate * config.acid_max_ml_min / 100.0f;
-    pump_acid.setFlowRate(acid_ml_min);
+    // Calculate ml to dose based on fuzzy rate and water volume
+    float ml_to_dose = water_volume * _config->ml_per_gallon_at_100pct
+                       * (fuzzy_rate / 100.0f);
 
-    // NOTE: Blowdown is MANUAL - the result.blowdown_rate is displayed
-    // as a recommendation only. Operator controls the valve.
-    // displayBlowdownRecommendation(result.blowdown_rate);
+    // Start pump for the calculated volume
+    if (!_status.running && ml_to_dose >= 0.01f) {
+        start(0, ml_to_dose);
+    }
 }
 ```
+
+### Fuzzy Output Mapping
+
+The fuzzy controller outputs are mapped to pumps as follows:
+
+| Pump | Fuzzy Output | Chemical |
+|------|--------------|----------|
+| PUMP_H2SO3 (0) | `acid_rate` | H₂SO₃ (acid) |
+| PUMP_NAOH (1) | `caustic_rate` | NaOH (caustic) |
+| PUMP_AMINE (2) | `sulfite_rate` | Amine/Sulfite |
+
+> **Note:** Blowdown is still MANUAL - the `blowdown_rate` is displayed as a recommendation only. The operator controls the blowdown valve.
 
 ## Data Logging
 

@@ -28,6 +28,7 @@
 #include "blowdown.h"
 #include "display.h"
 #include "data_logger.h"
+#include "fuzzy_logic.h"
 
 // ============================================================================
 // GLOBAL INSTANCES
@@ -244,12 +245,38 @@ void taskControlLoop(void* parameter) {
         uint32_t water_contacts = waterMeterManager.getContactsSinceLast(2);  // Both meters
         float water_volume = waterMeterManager.getVolumeSinceLast(2);
 
-        // Process pump feed modes
+        // Build fuzzy inputs from current readings and manual test values
+        fuzzy_inputs_t fuzzy_inputs;
+        fuzzy_inputs.conductivity = conductivity;
+        fuzzy_inputs.temperature = conductivitySensor.getLastReading().temperature_c;
+        fuzzy_inputs.cond_trend = 0.0f;  // TODO: Calculate from history
+        // Manual inputs are set via web UI or LCD menu through fuzzyController.setManualInput()
+        fuzzy_inputs.alkalinity = 0.0f;
+        fuzzy_inputs.sulfite = 0.0f;
+        fuzzy_inputs.ph = 0.0f;
+        fuzzy_inputs.alkalinity_valid = false;
+        fuzzy_inputs.sulfite_valid = false;
+        fuzzy_inputs.ph_valid = false;
+
+        // Evaluate fuzzy logic controller
+        fuzzy_result_t fuzzy_result = fuzzyController.evaluate(fuzzy_inputs);
+
+        // Map fuzzy outputs to pump array:
+        // [0] = PUMP_H2SO3 (acid) → acid_rate
+        // [1] = PUMP_NAOH (caustic) → caustic_rate
+        // [2] = PUMP_AMINE (sulfite) → sulfite_rate
+        float fuzzy_rates[PUMP_COUNT];
+        fuzzy_rates[PUMP_H2SO3] = fuzzy_result.acid_rate;
+        fuzzy_rates[PUMP_NAOH] = fuzzy_result.caustic_rate;
+        fuzzy_rates[PUMP_AMINE] = fuzzy_result.sulfite_rate;
+
+        // Process pump feed modes with fuzzy rates for Mode F
         pumpManager.processFeedModes(
             blowdownController.isActive(),
             blowdownController.getAccumulatedTime(),
             water_contacts,
-            water_volume
+            water_volume,
+            fuzzy_rates
         );
 
         // Update pumps (run steppers)
