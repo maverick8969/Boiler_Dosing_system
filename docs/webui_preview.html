@@ -1,0 +1,733 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Boiler Controller - Preview</title>
+    <style>
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+@keyframes slideIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes glow { 0%, 100% { box-shadow: 0 0 5px currentColor; } 50% { box-shadow: 0 0 20px currentColor, 0 0 30px currentColor; } }
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: linear-gradient(135deg, #0f0f23 0%, #1a1a3e 50%, #0f0f23 100%);
+    background-attachment: fixed;
+    color: #eee;
+    min-height: 100vh;
+    padding-bottom: 20px;
+}
+.container { max-width: 500px; margin: 0 auto; padding: 16px; }
+
+.preview-banner {
+    background: linear-gradient(135deg, #FF9800, #F57C00);
+    color: white;
+    text-align: center;
+    padding: 10px;
+    font-size: 0.85em;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+}
+
+header {
+    text-align: center;
+    padding: 24px 16px;
+    background: linear-gradient(180deg, rgba(255,255,255,0.05) 0%, transparent 100%);
+    border-bottom: 1px solid rgba(255,255,255,0.1);
+    margin-bottom: 20px;
+}
+header h1 {
+    font-size: 1.5em;
+    font-weight: 600;
+    background: linear-gradient(90deg, #4CAF50, #00BCD4);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+.status-bar {
+    margin-top: 12px;
+    font-size: 0.85em;
+    color: #888;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+}
+.status-indicator {
+    font-size: 0.9em;
+    animation: pulse 2s infinite;
+}
+.status-indicator.online { color: #4CAF50; text-shadow: 0 0 10px #4CAF50; }
+.status-indicator.offline { color: #f44336; animation: none; }
+
+.card {
+    background: linear-gradient(145deg, rgba(30,40,70,0.9) 0%, rgba(20,30,50,0.95) 100%);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 16px;
+    padding: 20px;
+    margin-bottom: 16px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.05);
+    backdrop-filter: blur(10px);
+    animation: slideIn 0.3s ease-out;
+}
+.card h2 {
+    font-size: 0.85em;
+    font-weight: 600;
+    color: #7aa2d4;
+    margin-bottom: 16px;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.card h2::before {
+    content: '';
+    display: inline-block;
+    width: 4px;
+    height: 16px;
+    background: linear-gradient(180deg, #4CAF50, #00BCD4);
+    border-radius: 2px;
+}
+.card.collapsed .card-content { display: none; }
+.card.collapsed h2 { margin-bottom: 0; cursor: pointer; }
+.card.collapsed h2:hover { color: #9fc5f8; }
+
+.readings-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+}
+.readings-grid.single {
+    grid-template-columns: 1fr;
+    max-width: 200px;
+    margin: 0 auto;
+}
+.reading {
+    text-align: center;
+    padding: 20px 12px;
+    background: linear-gradient(145deg, rgba(0,0,0,0.3) 0%, rgba(0,0,0,0.1) 100%);
+    border: 1px solid rgba(255,255,255,0.05);
+    border-radius: 12px;
+    transition: transform 0.2s, box-shadow 0.2s;
+}
+.reading:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 20px rgba(0,0,0,0.3);
+}
+.reading .label {
+    display: block;
+    font-size: 0.75em;
+    color: #888;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 8px;
+}
+.reading .value {
+    display: block;
+    font-size: 2.2em;
+    font-weight: 700;
+    background: linear-gradient(90deg, #4CAF50, #8BC34A);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    line-height: 1.1;
+}
+.reading .unit {
+    font-size: 0.8em;
+    color: #666;
+    margin-top: 4px;
+    display: block;
+}
+
+.input-group {
+    margin-bottom: 20px;
+    position: relative;
+}
+.input-group label {
+    display: block;
+    font-size: 0.85em;
+    color: #9fc5f8;
+    margin-bottom: 8px;
+    font-weight: 500;
+}
+.input-group input {
+    width: 100%;
+    padding: 16px;
+    font-size: 1.1em;
+    border: 2px solid rgba(255,255,255,0.1);
+    border-radius: 12px;
+    background: rgba(0,0,0,0.3);
+    color: #fff;
+    outline: none;
+    transition: all 0.3s ease;
+}
+.input-group input:focus {
+    border-color: #4CAF50;
+    box-shadow: 0 0 0 3px rgba(76,175,80,0.2);
+    background: rgba(0,0,0,0.4);
+}
+.input-group input::placeholder { color: #555; }
+.input-group input:valid:not(:placeholder-shown) {
+    border-color: rgba(76,175,80,0.5);
+}
+.test-age {
+    position: absolute;
+    right: 14px;
+    top: 42px;
+    font-size: 0.7em;
+    color: #888;
+    background: rgba(0,0,0,0.5);
+    padding: 2px 8px;
+    border-radius: 10px;
+}
+.test-age.stale { color: #ff9800; }
+.test-age.expired { color: #f44336; }
+
+.button-group {
+    display: flex;
+    gap: 12px;
+    margin-top: 24px;
+}
+.btn {
+    flex: 1;
+    padding: 16px;
+    font-size: 1em;
+    font-weight: 600;
+    border: none;
+    border-radius: 12px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+.btn:active { transform: scale(0.97); }
+.btn-primary {
+    background: linear-gradient(135deg, #4CAF50 0%, #45a049 100%);
+    color: white;
+    box-shadow: 0 4px 15px rgba(76,175,80,0.4);
+}
+.btn-primary:hover {
+    box-shadow: 0 6px 20px rgba(76,175,80,0.5);
+    transform: translateY(-1px);
+}
+.btn-primary.success {
+    background: linear-gradient(135deg, #00BCD4 0%, #0097A7 100%);
+}
+.btn-secondary {
+    background: rgba(255,255,255,0.1);
+    color: #aaa;
+    border: 1px solid rgba(255,255,255,0.1);
+}
+.btn-secondary:hover {
+    background: rgba(255,255,255,0.15);
+    color: #fff;
+}
+
+.confidence-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 16px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid rgba(255,255,255,0.1);
+}
+.confidence-badge {
+    padding: 6px 16px;
+    border-radius: 20px;
+    font-weight: 600;
+    font-size: 0.8em;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    transition: transform 0.2s;
+}
+.confidence-badge.HIGH {
+    background: linear-gradient(135deg, #4CAF50, #45a049);
+    color: white;
+    box-shadow: 0 2px 10px rgba(76,175,80,0.4);
+}
+.confidence-badge.MEDIUM {
+    background: linear-gradient(135deg, #FF9800, #F57C00);
+    color: white;
+    box-shadow: 0 2px 10px rgba(255,152,0,0.4);
+}
+.confidence-badge.LOW {
+    background: linear-gradient(135deg, #f44336, #d32f2f);
+    color: white;
+    box-shadow: 0 2px 10px rgba(244,67,54,0.4);
+    animation: pulse 1.5s infinite;
+}
+
+.output-grid { display: flex; flex-direction: column; gap: 16px; }
+.output {
+    display: grid;
+    grid-template-columns: 110px 1fr 55px;
+    align-items: center;
+    gap: 12px;
+}
+.output-label {
+    font-size: 0.85em;
+    color: #aaa;
+    font-weight: 500;
+}
+.rec-badge {
+    font-size: 0.7em;
+    background: linear-gradient(135deg, #FF9800, #F57C00);
+    color: white;
+    padding: 2px 6px;
+    border-radius: 4px;
+    margin-left: 6px;
+    vertical-align: middle;
+}
+.progress-bar {
+    height: 12px;
+    background: rgba(0,0,0,0.4);
+    border-radius: 6px;
+    overflow: hidden;
+    box-shadow: inset 0 2px 4px rgba(0,0,0,0.3);
+}
+.progress {
+    height: 100%;
+    border-radius: 6px;
+    transition: width 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+    background: linear-gradient(90deg, #4CAF50, #8BC34A);
+    box-shadow: 0 0 10px rgba(76,175,80,0.5);
+}
+.progress.caustic {
+    background: linear-gradient(90deg, #2196F3, #03A9F4);
+    box-shadow: 0 0 10px rgba(33,150,243,0.5);
+}
+.progress.sulfite {
+    background: linear-gradient(90deg, #9C27B0, #E91E63);
+    box-shadow: 0 0 10px rgba(156,39,176,0.5);
+}
+.progress.acid {
+    background: linear-gradient(90deg, #FF9800, #FFC107);
+    box-shadow: 0 0 10px rgba(255,152,0,0.5);
+}
+.output-value {
+    text-align: right;
+    font-weight: 600;
+    font-size: 0.95em;
+    font-family: 'SF Mono', 'Monaco', monospace;
+}
+
+.rules-info {
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px solid rgba(255,255,255,0.1);
+    font-size: 0.85em;
+    color: #888;
+    display: flex;
+    justify-content: center;
+    gap: 20px;
+}
+.rules-info strong {
+    color: #4CAF50;
+    font-family: 'SF Mono', 'Monaco', monospace;
+}
+
+.reference-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.9em;
+}
+.reference-table th, .reference-table td {
+    padding: 12px 8px;
+    text-align: left;
+}
+.reference-table th {
+    color: #888;
+    font-weight: 500;
+    border-bottom: 1px solid rgba(255,255,255,0.1);
+}
+.reference-table td {
+    border-bottom: 1px solid rgba(255,255,255,0.05);
+}
+.reference-table tr:last-child td { border-bottom: none; }
+.reference-table td:nth-child(2) {
+    color: #4CAF50;
+    font-weight: 600;
+    font-family: 'SF Mono', 'Monaco', monospace;
+}
+
+/* Toast notification */
+.toast {
+    position: fixed;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%) translateY(100px);
+    background: linear-gradient(135deg, #323232, #424242);
+    color: white;
+    padding: 14px 28px;
+    border-radius: 30px;
+    font-size: 0.9em;
+    font-weight: 500;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+    transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    z-index: 1000;
+}
+.toast.show { transform: translateX(-50%) translateY(0); }
+.toast.success { background: linear-gradient(135deg, #4CAF50, #45a049); }
+.toast.error { background: linear-gradient(135deg, #f44336, #d32f2f); }
+
+/* Demo controls */
+.demo-controls {
+    background: linear-gradient(145deg, rgba(50,60,90,0.9) 0%, rgba(40,50,70,0.95) 100%);
+    border: 2px dashed rgba(255,152,0,0.5);
+    border-radius: 16px;
+    padding: 20px;
+    margin-bottom: 16px;
+}
+.demo-controls h2 {
+    color: #FF9800 !important;
+}
+.demo-controls h2::before {
+    background: linear-gradient(180deg, #FF9800, #F57C00) !important;
+}
+.demo-slider {
+    width: 100%;
+    margin: 8px 0;
+    -webkit-appearance: none;
+    height: 8px;
+    border-radius: 4px;
+    background: rgba(0,0,0,0.3);
+}
+.demo-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: #4CAF50;
+    cursor: pointer;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+}
+.demo-label {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.8em;
+    color: #888;
+    margin-bottom: 4px;
+}
+.demo-label span:last-child {
+    color: #4CAF50;
+    font-family: 'SF Mono', 'Monaco', monospace;
+}
+    </style>
+</head>
+<body>
+    <div class="preview-banner">
+        PREVIEW MODE - This is a static demo of the ESP32 Web UI
+    </div>
+
+    <div class="container">
+        <header>
+            <h1>Boiler Water Test Entry</h1>
+            <div class="status-bar">
+                <span id="wifi-status" class="status-indicator online">●</span>
+                <span id="connection-text">Connected (Demo)</span>
+            </div>
+        </header>
+
+        <!-- Demo Controls -->
+        <section class="card demo-controls">
+            <h2>Demo Controls</h2>
+            <p style="font-size: 0.85em; color: #aaa; margin-bottom: 16px;">
+                Adjust these sliders to simulate fuzzy logic output changes:
+            </p>
+
+            <div class="demo-label">
+                <span>Blowdown</span>
+                <span id="demo-blowdown-val">32%</span>
+            </div>
+            <input type="range" class="demo-slider" id="demo-blowdown" min="0" max="100" value="32" oninput="updateDemo()">
+
+            <div class="demo-label">
+                <span>Caustic</span>
+                <span id="demo-caustic-val">15%</span>
+            </div>
+            <input type="range" class="demo-slider" id="demo-caustic" min="0" max="100" value="15" oninput="updateDemo()">
+
+            <div class="demo-label">
+                <span>Sulfite</span>
+                <span id="demo-sulfite-val">48%</span>
+            </div>
+            <input type="range" class="demo-slider" id="demo-sulfite" min="0" max="100" value="48" oninput="updateDemo()">
+
+            <div class="demo-label">
+                <span>Acid</span>
+                <span id="demo-acid-val">5%</span>
+            </div>
+            <input type="range" class="demo-slider" id="demo-acid" min="0" max="100" value="5" oninput="updateDemo()">
+
+            <div style="margin-top: 16px;">
+                <label style="font-size: 0.85em; color: #9fc5f8;">Confidence Level:</label>
+                <select id="demo-confidence" style="width: 100%; padding: 12px; margin-top: 8px; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; color: #fff;" onchange="updateDemo()">
+                    <option value="HIGH">HIGH - All 4 inputs valid</option>
+                    <option value="MEDIUM" selected>MEDIUM - 2-3 inputs valid</option>
+                    <option value="LOW">LOW - 0-1 inputs valid</option>
+                </select>
+            </div>
+        </section>
+
+        <!-- Sensor Reading -->
+        <section class="card">
+            <h2>Sensor Reading</h2>
+            <div class="readings-grid single">
+                <div class="reading">
+                    <span class="label">Temperature</span>
+                    <span class="value" id="temperature">42.3</span>
+                    <span class="unit">°C</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Manual Test Entry -->
+        <section class="card">
+            <h2>Enter Test Results</h2>
+            <form id="test-form">
+                <div class="input-group">
+                    <label for="tds">TDS (ppm)</label>
+                    <input type="number" id="tds" name="tds" value="2847"
+                           min="0" max="5000" step="1" placeholder="e.g., 2500">
+                    <span class="test-age" id="tds-age">1h ago</span>
+                </div>
+
+                <div class="input-group">
+                    <label for="alkalinity">Alkalinity (ppm CaCO₃)</label>
+                    <input type="number" id="alkalinity" name="alkalinity" value="285"
+                           min="0" max="1000" step="1" placeholder="e.g., 350">
+                    <span class="test-age" id="alk-age">2h ago</span>
+                </div>
+
+                <div class="input-group">
+                    <label for="sulfite">Sulfite (ppm SO₃)</label>
+                    <input type="number" id="sulfite" name="sulfite" value="32"
+                           min="0" max="100" step="1" placeholder="e.g., 30">
+                    <span class="test-age" id="sulf-age">2h ago</span>
+                </div>
+
+                <div class="input-group">
+                    <label for="ph">pH</label>
+                    <input type="number" id="ph" name="ph" value="10.9"
+                           min="7" max="14" step="0.1" placeholder="e.g., 11.0">
+                    <span class="test-age" id="ph-age">2h ago</span>
+                </div>
+
+                <div class="button-group">
+                    <button type="submit" class="btn btn-primary">Submit Tests</button>
+                    <button type="button" class="btn btn-secondary" onclick="clearTests()">Clear All</button>
+                </div>
+            </form>
+        </section>
+
+        <!-- Fuzzy Logic Output -->
+        <section class="card">
+            <h2>Control Recommendations</h2>
+            <div class="confidence-bar">
+                <span>Confidence:</span>
+                <span id="confidence" class="confidence-badge MEDIUM">MEDIUM</span>
+            </div>
+            <div class="output-grid">
+                <div class="output">
+                    <span class="output-label">Blowdown <span class="rec-badge">REC</span></span>
+                    <div class="progress-bar">
+                        <div class="progress" id="blowdown-bar" style="width: 32%"></div>
+                    </div>
+                    <span class="output-value" id="blowdown-val">32%</span>
+                </div>
+                <div class="output">
+                    <span class="output-label">Caustic (NaOH)</span>
+                    <div class="progress-bar">
+                        <div class="progress caustic" id="caustic-bar" style="width: 15%"></div>
+                    </div>
+                    <span class="output-value" id="caustic-val">15%</span>
+                </div>
+                <div class="output">
+                    <span class="output-label">Sulfite</span>
+                    <div class="progress-bar">
+                        <div class="progress sulfite" id="sulfite-bar" style="width: 48%"></div>
+                    </div>
+                    <span class="output-value" id="sulfite-val">48%</span>
+                </div>
+                <div class="output">
+                    <span class="output-label">Acid</span>
+                    <div class="progress-bar">
+                        <div class="progress acid" id="acid-bar" style="width: 5%"></div>
+                    </div>
+                    <span class="output-value" id="acid-val">5%</span>
+                </div>
+            </div>
+            <div class="rules-info">
+                <span>Active Rules: <strong id="active-rules">8</strong></span>
+            </div>
+        </section>
+
+        <!-- Quick Reference -->
+        <section class="card collapsed">
+            <h2 onclick="toggleCard(this)">Target Ranges ▼</h2>
+            <div class="card-content">
+                <table class="reference-table">
+                    <tr><th>Parameter</th><th>Target</th><th>Range</th></tr>
+                    <tr><td>TDS</td><td id="sp-tds">2500</td><td>2000-3000 ppm</td></tr>
+                    <tr><td>Alkalinity</td><td id="sp-alk">300</td><td>200-400 ppm</td></tr>
+                    <tr><td>Sulfite</td><td id="sp-sulf">30</td><td>20-40 ppm</td></tr>
+                    <tr><td>pH</td><td id="sp-ph">11.0</td><td>10.5-11.5</td></tr>
+                </table>
+            </div>
+        </section>
+
+        <!-- System Info (Preview only) -->
+        <section class="card">
+            <h2>System Info</h2>
+            <div style="font-size: 0.85em; color: #888;">
+                <p><strong style="color: #aaa;">Boiler:</strong> Columbia CT-6 (16 gal)</p>
+                <p><strong style="color: #aaa;">Feedwater Tank:</strong> 25 gal</p>
+                <p><strong style="color: #aaa;">Water Meter:</strong> 1 pulse/gallon</p>
+                <p><strong style="color: #aaa;">Feed Mode:</strong> F (Fuzzy Logic)</p>
+                <p style="margin-top: 12px; font-size: 0.8em; color: #666;">
+                    This preview demonstrates the web UI served by the ESP32 controller.
+                    In production, this connects to the actual hardware at
+                    <code style="background: rgba(0,0,0,0.3); padding: 2px 6px; border-radius: 4px;">http://&lt;controller-ip&gt;/</code>
+                </p>
+            </div>
+        </section>
+    </div>
+
+    <script>
+let toastTimeout = null;
+
+function showToast(message, type = 'info') {
+    let toast = document.getElementById('toast');
+    if (!toast) {
+        toast = document.createElement('div');
+        toast.id = 'toast';
+        toast.className = 'toast';
+        document.body.appendChild(toast);
+    }
+
+    toast.textContent = message;
+    toast.className = 'toast ' + type;
+
+    clearTimeout(toastTimeout);
+    requestAnimationFrame(() => {
+        toast.classList.add('show');
+        toastTimeout = setTimeout(() => toast.classList.remove('show'), 3000);
+    });
+}
+
+function updateDemo() {
+    const blowdown = document.getElementById('demo-blowdown').value;
+    const caustic = document.getElementById('demo-caustic').value;
+    const sulfite = document.getElementById('demo-sulfite').value;
+    const acid = document.getElementById('demo-acid').value;
+    const confidence = document.getElementById('demo-confidence').value;
+
+    // Update demo value labels
+    document.getElementById('demo-blowdown-val').textContent = blowdown + '%';
+    document.getElementById('demo-caustic-val').textContent = caustic + '%';
+    document.getElementById('demo-sulfite-val').textContent = sulfite + '%';
+    document.getElementById('demo-acid-val').textContent = acid + '%';
+
+    // Update output bars
+    setOutput('blowdown', parseInt(blowdown));
+    setOutput('caustic', parseInt(caustic));
+    setOutput('sulfite', parseInt(sulfite));
+    setOutput('acid', parseInt(acid));
+
+    // Update confidence badge
+    const badge = document.getElementById('confidence');
+    badge.textContent = confidence;
+    badge.className = 'confidence-badge ' + confidence;
+
+    // Simulate active rules based on confidence
+    const rules = confidence === 'HIGH' ? 12 : confidence === 'MEDIUM' ? 8 : 3;
+    document.getElementById('active-rules').textContent = rules;
+}
+
+function setOutput(name, value) {
+    const bar = document.getElementById(name + '-bar');
+    const val = document.getElementById(name + '-val');
+
+    bar.style.width = value + '%';
+    val.textContent = value + '%';
+
+    // Add glow effect for high values
+    if (value > 70) {
+        bar.style.boxShadow = '0 0 15px currentColor';
+    } else {
+        bar.style.boxShadow = '';
+    }
+}
+
+function toggleCard(header) {
+    const card = header.parentElement;
+    card.classList.toggle('collapsed');
+    const arrow = header.textContent.includes('▼') ? '▶' : '▼';
+    header.textContent = header.textContent.replace(/[▼▶]/, arrow);
+}
+
+function clearTests() {
+    if (!confirm('Clear all manual test values?')) return;
+
+    document.getElementById('tds').value = '';
+    document.getElementById('alkalinity').value = '';
+    document.getElementById('sulfite').value = '';
+    document.getElementById('ph').value = '';
+
+    // Clear age labels
+    document.getElementById('tds-age').textContent = '';
+    document.getElementById('alk-age').textContent = '';
+    document.getElementById('sulf-age').textContent = '';
+    document.getElementById('ph-age').textContent = '';
+
+    showToast('Test values cleared', 'success');
+}
+
+// Form submission (demo mode)
+document.getElementById('test-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+
+    const btn = e.target.querySelector('.btn-primary');
+
+    btn.disabled = true;
+    btn.textContent = 'Submitting...';
+
+    setTimeout(() => {
+        btn.textContent = 'Submitted!';
+        btn.classList.add('success');
+        showToast('Test results saved (demo mode)', 'success');
+
+        // Update age labels to show "just now"
+        const inputs = ['tds', 'alkalinity', 'sulfite', 'ph'];
+        const ageLabels = ['tds-age', 'alk-age', 'sulf-age', 'ph-age'];
+
+        inputs.forEach((id, i) => {
+            if (document.getElementById(id).value) {
+                document.getElementById(ageLabels[i]).textContent = 'just now';
+                document.getElementById(ageLabels[i]).className = 'test-age';
+            }
+        });
+
+        setTimeout(() => {
+            btn.textContent = 'Submit Tests';
+            btn.classList.remove('success');
+            btn.disabled = false;
+        }, 2000);
+    }, 500);
+});
+
+// Simulate temperature fluctuation
+setInterval(() => {
+    const temp = document.getElementById('temperature');
+    const current = parseFloat(temp.textContent);
+    const newTemp = current + (Math.random() - 0.5) * 0.3;
+    temp.textContent = newTemp.toFixed(1);
+}, 3000);
+
+// Initial demo values
+updateDemo();
+    </script>
+</body>
+</html>
