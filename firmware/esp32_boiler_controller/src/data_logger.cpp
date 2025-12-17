@@ -270,6 +270,9 @@ bool DataLogger::uploadReading(sensor_reading_t* reading) {
 
     _http.begin(url);
     _http.addHeader("Content-Type", "application/json");
+    if (strlen(_config->api_key) > 0) {
+        _http.addHeader("X-API-Key", _config->api_key);
+    }
 
     _last_http_status = _http.POST(json);
 
@@ -287,12 +290,15 @@ bool DataLogger::uploadEvent(event_log_t* event) {
     if (!_config || strlen(_config->tsdb_host) == 0) return false;
 
     String url = "http://" + String(_config->tsdb_host) + ":" +
-                 String(_config->tsdb_port) + "/api/events";
+                 String(_config->tsdb_port) + "/api/events/pump";
 
     String json = buildEventJSON(event);
 
     _http.begin(url);
     _http.addHeader("Content-Type", "application/json");
+    if (strlen(_config->api_key) > 0) {
+        _http.addHeader("X-API-Key", _config->api_key);
+    }
 
     _last_http_status = _http.POST(json);
 
@@ -311,6 +317,9 @@ bool DataLogger::uploadAlarm(alarm_log_t* alarm) {
 
     _http.begin(url);
     _http.addHeader("Content-Type", "application/json");
+    if (strlen(_config->api_key) > 0) {
+        _http.addHeader("X-API-Key", _config->api_key);
+    }
 
     _last_http_status = _http.POST(json);
 

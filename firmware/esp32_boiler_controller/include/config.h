@@ -57,8 +57,9 @@
 #define TSDB_TABLE_ALARMS       "alarm_history"
 
 // HTTP endpoint for data logging (via TimescaleDB REST API or custom backend)
-#define TSDB_HTTP_PORT          8080
+#define TSDB_HTTP_PORT          3000    // API server port (not PostgreSQL)
 #define TSDB_LOG_INTERVAL_MS    10000   // 10 seconds default
+#define TSDB_API_KEY_MAX_LEN    64      // API authentication key length
 
 // ============================================================================
 // SAMPLING MODE DEFINITIONS
@@ -335,6 +336,7 @@ typedef struct {
     char wifi_password[WIFI_PASS_MAX_LEN];
     char tsdb_host[TSDB_HOST_MAX_LEN];
     uint16_t tsdb_port;
+    char api_key[TSDB_API_KEY_MAX_LEN];     // API authentication key
     uint32_t log_interval_ms;
 
     // Security
