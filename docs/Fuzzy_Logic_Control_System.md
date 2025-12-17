@@ -27,24 +27,30 @@ The fuzzy logic controller provides intelligent, adaptive chemical dosing based 
 └─────────────────────────────────────────────────────────────────────────┘
          ▲                                              │
          │                                              ▼
-┌────────┴────────┐                          ┌─────────────────────┐
-│     INPUTS      │                          │      OUTPUTS        │
-├─────────────────┤                          ├─────────────────────┤
-│ • Conductivity  │                          │ • Blowdown Rate     │
-│ • Alkalinity    │                          │ • Caustic (NaOH)    │
-│ • Sulfite       │                          │ • Sulfite Dosing    │
-│ • pH            │                          │ • Acid (H2SO3)      │
-│ • Temperature   │                          └─────────────────────┘
+┌────────┴────────┐                          ┌─────────────────────────┐
+│  INPUTS (Manual)│                          │   OUTPUTS               │
+├─────────────────┤                          ├─────────────────────────┤
+│ • TDS           │                          │ • Blowdown Rate (REC)   │
+│ • Alkalinity    │                          │ • Caustic (NaOH)        │
+│ • Sulfite       │                          │ • Sulfite Dosing        │
+│ • pH            │                          │ • Acid (H2SO3)          │
+├─────────────────┤                          └─────────────────────────┘
+│  INPUT (Sensor) │
+├─────────────────┤       Note: Blowdown output is a RECOMMENDATION
+│ • Temperature   │       only. Operator controls the valve manually.
 │ • Trend         │
 └─────────────────┘
 ```
 
+**Manual Operation Mode:** All inputs except temperature are entered manually via the Web UI or LCD menu. This allows the system to work with standard titration tests and periodic TDS measurements.
+
 ## Input Variables
 
-### 1. Conductivity (TDS Proxy)
-- **Source:** Sensorex CS675HTTC-P1K sensor
-- **Range:** 0-5000 µS/cm
-- **Purpose:** Indicates cycles of concentration
+### 1. TDS (Total Dissolved Solids)
+- **Source:** Manual test (TDS meter or calculated from conductivity)
+- **Range:** 0-5000 ppm
+- **Purpose:** Indicates cycles of concentration, determines blowdown need
+- **Target:** 2000-3000 ppm for typical low-pressure boilers
 - **Membership Sets:**
 
 ```
@@ -54,56 +60,58 @@ The fuzzy logic controller provides intelligent, adaptive chemical dosing based 
     │       ╲    ╱╲        ╱╲      ╱╲   ╱       │
     │        ╲  ╱  ╲      ╱  ╲    ╱  ╲ ╱        │
 0.0 ─┴────────╲╱────╲────╱────╲──╱────╳─────────┴────
-    0       1000    1500  2000  2500  3000   5000 µS/cm
+    0       1000    1500  2000  2500  3000   5000 ppm
                           ▲
                        Setpoint
 ```
 
 ### 2. Alkalinity (ppm as CaCO3)
-- **Source:** Manual test or inline analyzer
+- **Source:** Manual test (titration)
 - **Range:** 0-1000 ppm
 - **Purpose:** Corrosion protection, pH buffering
 - **Target:** 200-400 ppm for low-pressure boilers
 
 ### 3. Sulfite Residual (ppm SO₃)
-- **Source:** Manual test or inline analyzer
+- **Source:** Manual test (titration or test kit)
 - **Range:** 0-100 ppm
 - **Purpose:** Oxygen scavenging
 - **Target:** 20-40 ppm (varies with pressure)
 
 ### 4. pH
-- **Source:** pH sensor or manual test
+- **Source:** Manual test (meter or strips)
 - **Range:** 7.0-14.0
 - **Purpose:** Corrosion control
 - **Target:** 10.5-11.5 for typical boilers
 
 ### 5. Temperature (°C)
-- **Source:** Pt1000 RTD
+- **Source:** Pt1000 RTD (automatic sensor)
 - **Range:** 0-100°C
-- **Purpose:** Compensation factor
+- **Purpose:** Compensation factor, reference display
 
 ### 6. Trend (Rate of Change)
-- **Source:** Calculated from conductivity history
-- **Range:** -100 to +100 µS/cm per minute
-- **Purpose:** Predictive control
+- **Source:** Calculated from TDS history
+- **Range:** -100 to +100 ppm per hour
+- **Purpose:** Predictive control (optional)
 
 ## Output Variables
 
 | Output | Range | Controls |
 |--------|-------|----------|
-| Blowdown Rate | 0-100% | Surface blowdown valve duty cycle |
+| Blowdown Rate | 0-100% | **RECOMMENDATION** - Operator controls valve manually |
 | Caustic Rate | 0-100% | NaOH pump speed |
 | Sulfite Rate | 0-100% | Sulfite/amine pump speed |
 | Acid Rate | 0-100% | H2SO3 pump speed |
+
+> **Note:** Blowdown is manual in this system. The fuzzy logic provides a recommendation percentage, but the operator decides when and how long to open the blowdown valve.
 
 ## Rule Base
 
 The system uses **25 default rules** based on industry best practices. Rules can be customized via the LCD menu or configuration.
 
-### Core Conductivity Rules
+### Core TDS Rules
 
-| # | IF Conductivity is... | THEN Blowdown is... |
-|---|----------------------|---------------------|
+| # | IF TDS is... | THEN Blowdown (Rec) is... |
+|---|--------------|---------------------------|
 | 1 | Very High | Very High |
 | 2 | High | High |
 | 3 | Normal | Zero |
@@ -134,10 +142,10 @@ The system uses **25 default rules** based on industry best practices. Rules can
 
 | # | IF | THEN |
 |---|-----|------|
-| 21 | Cond HIGH AND Alk HIGH | Blowdown VERY HIGH |
-| 22 | Cond LOW AND Alk LOW | Caustic HIGH |
+| 21 | TDS HIGH AND Alk HIGH | Blowdown (Rec) VERY HIGH |
+| 22 | TDS LOW AND Alk LOW | Caustic HIGH |
 | 23 | Sulfite LOW AND Temp HOT | Sulfite VERY HIGH |
-| 24 | Cond NORMAL AND Alk NORMAL AND Sulfite NORMAL | All outputs minimal |
+| 24 | TDS NORMAL AND Alk NORMAL AND Sulfite NORMAL | All outputs minimal |
 
 ## Inference Method
 
@@ -151,34 +159,38 @@ The controller uses **Mamdani inference** with:
 
 ```
 Given:
-  Conductivity = 2800 µS/cm (setpoint 2500)
+  TDS = 2800 ppm (setpoint 2500)
   Alkalinity = 350 ppm (normal)
   Sulfite = 25 ppm (slightly low)
 
 Fuzzification:
-  Cond: Normal=0.3, High=0.7
+  TDS:  Normal=0.3, High=0.7
   Alk:  Normal=0.9, High=0.1
   Sulf: Low=0.6, Normal=0.4
 
 Rule Activation:
-  Rule 2 (Cond HIGH → Blowdown HIGH): 0.7
-  Rule 3 (Cond NORMAL → Blowdown ZERO): 0.3
+  Rule 2 (TDS HIGH → Blowdown HIGH): 0.7
+  Rule 3 (TDS NORMAL → Blowdown ZERO): 0.3
   Rule 8 (Alk NORMAL → Caustic ZERO): 0.9
   Rule 12 (Sulf LOW → Sulfite HIGH): 0.6
   Rule 13 (Sulf NORMAL → Sulfite LOW): 0.4
 
 Aggregation & Defuzzification:
-  Blowdown: 58% (weighted between HIGH and ZERO)
+  Blowdown (Rec): 58% (weighted between HIGH and ZERO)
   Caustic: 5% (mostly ZERO)
   Sulfite: 62% (weighted between HIGH and LOW)
 ```
 
+> The operator sees "Blowdown: 58%" as a recommendation and decides how to proceed.
+
 ## Manual Test Input
 
-Since alkalinity and sulfite typically require titration tests, operators can enter manual values via the LCD menu:
+All water chemistry parameters (except temperature) are entered manually via the Web UI or LCD menu:
 
 ```
 MANUAL TEST INPUTS
+├── TDS
+│   └── Enter ppm: [____]
 ├── Alkalinity
 │   └── Enter ppm: [___]
 ├── Sulfite
@@ -191,7 +203,10 @@ MANUAL TEST INPUTS
 Manual values remain active until:
 - Cleared manually
 - New value entered
+- Configured expiration time (default: 8 hours)
 - System reboot (configurable)
+
+**Web UI:** Access at `http://<controller-ip>/` for a mobile-friendly test entry interface.
 
 ## Configuration Parameters
 
@@ -227,17 +242,20 @@ FUZZY CONTROL
 ├── View Status
 │   ├── Inputs (fuzzified)
 │   ├── Active Rules: 8
-│   ├── Outputs (%)
+│   ├── Outputs (%) - Note: Blowdown is REC only
 │   └── Dominant Rule: #5
 ├── Setpoints
-│   ├── Conductivity: [2500] µS/cm
+│   ├── TDS: [2500] ppm
 │   ├── Alkalinity: [300] ppm
 │   ├── Sulfite: [30] ppm
 │   └── pH: [11.0]
 ├── Deadbands
 │   └── ...
 ├── Manual Test Input
-│   └── ...
+│   ├── TDS: [____] ppm
+│   ├── Alkalinity: [___] ppm
+│   ├── Sulfite: [__] ppm
+│   └── pH: [__._]
 └── Advanced
     ├── Aggressive Mode: [OFF]
     ├── Rule Editor
@@ -246,7 +264,7 @@ FUZZY CONTROL
 
 ## Integration with Pump Control
 
-The fuzzy output (0-100%) is converted to actual pump operation:
+The fuzzy output (0-100%) is converted to actual pump operation for chemical dosing:
 
 ```cpp
 // In chemical_pump.cpp
@@ -259,8 +277,13 @@ void applyFuzzyOutput(fuzzy_result_t& result) {
     float sulfite_ml_min = result.sulfite_rate * config.sulfite_max_ml_min / 100.0f;
     pump_sulfite.setFlowRate(sulfite_ml_min);
 
-    // Blowdown valve
-    blowdown.setIntensity(result.blowdown_rate);
+    // Acid pump
+    float acid_ml_min = result.acid_rate * config.acid_max_ml_min / 100.0f;
+    pump_acid.setFlowRate(acid_ml_min);
+
+    // NOTE: Blowdown is MANUAL - the result.blowdown_rate is displayed
+    // as a recommendation only. Operator controls the valve.
+    // displayBlowdownRecommendation(result.blowdown_rate);
 }
 ```
 
@@ -271,15 +294,17 @@ Fuzzy controller state is logged to TimescaleDB:
 ```sql
 CREATE TABLE fuzzy_log (
     time            TIMESTAMPTZ NOT NULL,
-    cond_input      REAL,
-    alk_input       REAL,
-    sulfite_input   REAL,
-    blowdown_out    REAL,
-    caustic_out     REAL,
-    sulfite_out     REAL,
-    acid_out        REAL,
+    tds_input       REAL,           -- Manual TDS entry (ppm)
+    alk_input       REAL,           -- Manual alkalinity (ppm)
+    sulfite_input   REAL,           -- Manual sulfite (ppm)
+    ph_input        REAL,           -- Manual pH
+    blowdown_rec    REAL,           -- Blowdown RECOMMENDATION (%)
+    caustic_out     REAL,           -- Caustic dosing output (%)
+    sulfite_out     REAL,           -- Sulfite dosing output (%)
+    acid_out        REAL,           -- Acid dosing output (%)
     active_rules    INTEGER,
-    dominant_rule   INTEGER
+    dominant_rule   INTEGER,
+    confidence      TEXT            -- HIGH, MEDIUM, LOW
 );
 ```
 
@@ -308,10 +333,11 @@ CREATE TABLE fuzzy_log (
 
 The fuzzy controller respects all safety limits:
 
-1. **Maximum Blowdown Time** - Hard limit per cycle
+1. **Manual Blowdown Control** - Operator always controls blowdown valve
 2. **Chemical Lockout** - After blowdown to prevent waste
-3. **Alarm Override** - High-high conductivity bypasses fuzzy, forces max blowdown
-4. **Manual Override** - Operator can disable fuzzy and use manual rates
+3. **High TDS Warning** - Visual/audible alert when TDS exceeds threshold
+4. **Manual Override** - Operator can disable fuzzy and use manual pump rates
+5. **Low Confidence Alert** - Warning when insufficient test data is entered
 
 ## References
 

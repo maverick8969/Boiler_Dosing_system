@@ -112,20 +112,25 @@ void BoilerWebServer::handleGetStatus() {
 
     // Manual test values
     JsonObject tests = doc["manual_tests"].to<JsonObject>();
-    tests["alkalinity"]["value"] = _manual_tests[0].value;
-    tests["alkalinity"]["valid"] = _manual_tests[0].valid;
-    tests["alkalinity"]["age_min"] = _manual_tests[0].valid ?
+    tests["tds"]["value"] = _manual_tests[0].value;
+    tests["tds"]["valid"] = _manual_tests[0].valid;
+    tests["tds"]["age_min"] = _manual_tests[0].valid ?
         (millis() - _manual_tests[0].timestamp) / 60000 : -1;
 
-    tests["sulfite"]["value"] = _manual_tests[1].value;
-    tests["sulfite"]["valid"] = _manual_tests[1].valid;
-    tests["sulfite"]["age_min"] = _manual_tests[1].valid ?
+    tests["alkalinity"]["value"] = _manual_tests[1].value;
+    tests["alkalinity"]["valid"] = _manual_tests[1].valid;
+    tests["alkalinity"]["age_min"] = _manual_tests[1].valid ?
         (millis() - _manual_tests[1].timestamp) / 60000 : -1;
 
-    tests["ph"]["value"] = _manual_tests[2].value;
-    tests["ph"]["valid"] = _manual_tests[2].valid;
-    tests["ph"]["age_min"] = _manual_tests[2].valid ?
+    tests["sulfite"]["value"] = _manual_tests[2].value;
+    tests["sulfite"]["valid"] = _manual_tests[2].valid;
+    tests["sulfite"]["age_min"] = _manual_tests[2].valid ?
         (millis() - _manual_tests[2].timestamp) / 60000 : -1;
+
+    tests["ph"]["value"] = _manual_tests[3].value;
+    tests["ph"]["valid"] = _manual_tests[3].valid;
+    tests["ph"]["age_min"] = _manual_tests[3].valid ?
+        (millis() - _manual_tests[3].timestamp) / 60000 : -1;
 
     String response;
     serializeJson(doc, response);
@@ -151,11 +156,12 @@ void BoilerWebServer::handleGetFuzzy() {
     doc["max_firing"] = _current_fuzzy_result.max_firing_strength;
     doc["dominant_rule"] = _current_fuzzy_result.dominant_rule;
 
-    // Input validity affects confidence
-    int valid_inputs = 1;  // Conductivity always valid
-    if (_manual_tests[0].valid) valid_inputs++;
-    if (_manual_tests[1].valid) valid_inputs++;
-    if (_manual_tests[2].valid) valid_inputs++;
+    // Input validity affects confidence (ALL manual inputs)
+    int valid_inputs = 0;
+    if (_manual_tests[0].valid) valid_inputs++;  // TDS
+    if (_manual_tests[1].valid) valid_inputs++;  // Alkalinity
+    if (_manual_tests[2].valid) valid_inputs++;  // Sulfite
+    if (_manual_tests[3].valid) valid_inputs++;  // pH
 
     doc["input_count"] = valid_inputs;
     doc["confidence"] = (valid_inputs == 4) ? "HIGH" :
@@ -164,7 +170,7 @@ void BoilerWebServer::handleGetFuzzy() {
     // Setpoints for reference
     if (_config) {
         JsonObject setpoints = doc["setpoints"].to<JsonObject>();
-        setpoints["conductivity"] = _config->fuzzy.cond_setpoint;
+        setpoints["tds"] = _config->fuzzy.cond_setpoint;  // TDS target (ppm)
         setpoints["alkalinity"] = _config->fuzzy.alk_setpoint;
         setpoints["sulfite"] = _config->fuzzy.sulfite_setpoint;
         setpoints["ph"] = _config->fuzzy.ph_setpoint;
@@ -193,13 +199,31 @@ void BoilerWebServer::handlePostTest() {
 
     bool updated = false;
 
+    // Update TDS (ppm)
+    if (doc.containsKey("tds")) {
+        float value = doc["tds"].as<float>();
+        if (value >= 0 && value <= 5000) {
+            _manual_tests[0].value = value;
+            _manual_tests[0].timestamp = millis();
+            _manual_tests[0].valid = true;
+
+            if (_fuzzy) {
+                _fuzzy->setManualInput(FUZZY_IN_TDS, value, true);
+            }
+            if (_test_input_callback) {
+                _test_input_callback(FUZZY_IN_TDS, value, true);
+            }
+            updated = true;
+        }
+    }
+
     // Update alkalinity
     if (doc.containsKey("alkalinity")) {
         float value = doc["alkalinity"].as<float>();
         if (value >= 0 && value <= 1000) {
-            _manual_tests[0].value = value;
-            _manual_tests[0].timestamp = millis();
-            _manual_tests[0].valid = true;
+            _manual_tests[1].value = value;
+            _manual_tests[1].timestamp = millis();
+            _manual_tests[1].valid = true;
 
             if (_fuzzy) {
                 _fuzzy->setManualInput(FUZZY_IN_ALKALINITY, value, true);
@@ -215,9 +239,9 @@ void BoilerWebServer::handlePostTest() {
     if (doc.containsKey("sulfite")) {
         float value = doc["sulfite"].as<float>();
         if (value >= 0 && value <= 100) {
-            _manual_tests[1].value = value;
-            _manual_tests[1].timestamp = millis();
-            _manual_tests[1].valid = true;
+            _manual_tests[2].value = value;
+            _manual_tests[2].timestamp = millis();
+            _manual_tests[2].valid = true;
 
             if (_fuzzy) {
                 _fuzzy->setManualInput(FUZZY_IN_SULFITE, value, true);
@@ -233,9 +257,9 @@ void BoilerWebServer::handlePostTest() {
     if (doc.containsKey("ph")) {
         float value = doc["ph"].as<float>();
         if (value >= 7.0 && value <= 14.0) {
-            _manual_tests[2].value = value;
-            _manual_tests[2].timestamp = millis();
-            _manual_tests[2].valid = true;
+            _manual_tests[3].value = value;
+            _manual_tests[3].timestamp = millis();
+            _manual_tests[3].valid = true;
 
             if (_fuzzy) {
                 _fuzzy->setManualInput(FUZZY_IN_PH, value, true);
@@ -259,20 +283,25 @@ void BoilerWebServer::handleGetTests() {
 
     JsonDocument doc;
 
-    doc["alkalinity"]["value"] = _manual_tests[0].value;
-    doc["alkalinity"]["valid"] = _manual_tests[0].valid;
-    doc["alkalinity"]["age_minutes"] = _manual_tests[0].valid ?
+    doc["tds"]["value"] = _manual_tests[0].value;
+    doc["tds"]["valid"] = _manual_tests[0].valid;
+    doc["tds"]["age_minutes"] = _manual_tests[0].valid ?
         (millis() - _manual_tests[0].timestamp) / 60000 : -1;
 
-    doc["sulfite"]["value"] = _manual_tests[1].value;
-    doc["sulfite"]["valid"] = _manual_tests[1].valid;
-    doc["sulfite"]["age_minutes"] = _manual_tests[1].valid ?
+    doc["alkalinity"]["value"] = _manual_tests[1].value;
+    doc["alkalinity"]["valid"] = _manual_tests[1].valid;
+    doc["alkalinity"]["age_minutes"] = _manual_tests[1].valid ?
         (millis() - _manual_tests[1].timestamp) / 60000 : -1;
 
-    doc["ph"]["value"] = _manual_tests[2].value;
-    doc["ph"]["valid"] = _manual_tests[2].valid;
-    doc["ph"]["age_minutes"] = _manual_tests[2].valid ?
+    doc["sulfite"]["value"] = _manual_tests[2].value;
+    doc["sulfite"]["valid"] = _manual_tests[2].valid;
+    doc["sulfite"]["age_minutes"] = _manual_tests[2].valid ?
         (millis() - _manual_tests[2].timestamp) / 60000 : -1;
+
+    doc["ph"]["value"] = _manual_tests[3].value;
+    doc["ph"]["valid"] = _manual_tests[3].valid;
+    doc["ph"]["age_minutes"] = _manual_tests[3].valid ?
+        (millis() - _manual_tests[3].timestamp) / 60000 : -1;
 
     String response;
     serializeJson(doc, response);
@@ -282,11 +311,12 @@ void BoilerWebServer::handleGetTests() {
 void BoilerWebServer::handleClearTests() {
     sendCORSHeaders();
 
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 4; i++) {
         _manual_tests[i].valid = false;
     }
 
     if (_fuzzy) {
+        _fuzzy->setManualInput(FUZZY_IN_TDS, 0, false);
         _fuzzy->setManualInput(FUZZY_IN_ALKALINITY, 0, false);
         _fuzzy->setManualInput(FUZZY_IN_SULFITE, 0, false);
         _fuzzy->setManualInput(FUZZY_IN_PH, 0, false);
@@ -329,15 +359,10 @@ String BoilerWebServer::generateIndexHTML() {
             </div>
         </header>
 
-        <!-- Current Readings -->
+        <!-- Sensor Reading -->
         <section class="card">
-            <h2>Current Readings</h2>
-            <div class="readings-grid">
-                <div class="reading">
-                    <span class="label">Conductivity</span>
-                    <span class="value" id="conductivity">--</span>
-                    <span class="unit">µS/cm</span>
-                </div>
+            <h2>Sensor Reading</h2>
+            <div class="readings-grid single">
                 <div class="reading">
                     <span class="label">Temperature</span>
                     <span class="value" id="temperature">--</span>
@@ -350,6 +375,13 @@ String BoilerWebServer::generateIndexHTML() {
         <section class="card">
             <h2>Enter Test Results</h2>
             <form id="test-form">
+                <div class="input-group">
+                    <label for="tds">TDS (ppm)</label>
+                    <input type="number" id="tds" name="tds"
+                           min="0" max="5000" step="1" placeholder="e.g., 2500">
+                    <span class="test-age" id="tds-age"></span>
+                </div>
+
                 <div class="input-group">
                     <label for="alkalinity">Alkalinity (ppm CaCO₃)</label>
                     <input type="number" id="alkalinity" name="alkalinity"
@@ -387,7 +419,7 @@ String BoilerWebServer::generateIndexHTML() {
             </div>
             <div class="output-grid">
                 <div class="output">
-                    <span class="output-label">Blowdown</span>
+                    <span class="output-label">Blowdown <span class="rec-badge">REC</span></span>
                     <div class="progress-bar">
                         <div class="progress" id="blowdown-bar" style="width: 0%"></div>
                     </div>
@@ -426,7 +458,7 @@ String BoilerWebServer::generateIndexHTML() {
             <div class="card-content">
                 <table class="reference-table">
                     <tr><th>Parameter</th><th>Target</th><th>Range</th></tr>
-                    <tr><td>Conductivity</td><td id="sp-cond">2500</td><td>±200 µS/cm</td></tr>
+                    <tr><td>TDS</td><td id="sp-tds">2500</td><td>2000-3000 ppm</td></tr>
                     <tr><td>Alkalinity</td><td id="sp-alk">300</td><td>200-400 ppm</td></tr>
                     <tr><td>Sulfite</td><td id="sp-sulf">30</td><td>20-40 ppm</td></tr>
                     <tr><td>pH</td><td id="sp-ph">11.0</td><td>10.5-11.5</td></tr>
@@ -534,6 +566,11 @@ header h1 {
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 12px;
+}
+.readings-grid.single {
+    grid-template-columns: 1fr;
+    max-width: 200px;
+    margin: 0 auto;
 }
 .reading {
     text-align: center;
@@ -701,6 +738,15 @@ header h1 {
     color: #aaa;
     font-weight: 500;
 }
+.rec-badge {
+    font-size: 0.7em;
+    background: linear-gradient(135deg, #FF9800, #F57C00);
+    color: white;
+    padding: 2px 6px;
+    border-radius: 4px;
+    margin-left: 6px;
+    vertical-align: middle;
+}
 .progress-bar {
     height: 12px;
     background: rgba(0,0,0,0.4);
@@ -847,15 +893,8 @@ async function fetchStatus() {
         const res = await fetch('/api/status');
         const data = await res.json();
 
-        // Animate conductivity and temperature updates
-        const condElem = document.getElementById('conductivity');
+        // Animate temperature update (only sensor reading)
         const tempElem = document.getElementById('temperature');
-
-        if (condElem.textContent !== '--') {
-            animateValue(condElem, data.conductivity);
-        } else {
-            condElem.textContent = data.conductivity.toFixed(0);
-        }
 
         if (tempElem.textContent !== '--') {
             animateValue(tempElem, data.temperature);
@@ -864,15 +903,20 @@ async function fetchStatus() {
         }
 
         // Update test ages with styling
+        updateTestAge('tds-age', data.manual_tests.tds);
         updateTestAge('alk-age', data.manual_tests.alkalinity);
         updateTestAge('sulf-age', data.manual_tests.sulfite);
         updateTestAge('ph-age', data.manual_tests.ph);
 
         // Fill inputs with current values if valid and empty
+        const tdsInput = document.getElementById('tds');
         const alkInput = document.getElementById('alkalinity');
         const sulfInput = document.getElementById('sulfite');
         const phInput = document.getElementById('ph');
 
+        if (data.manual_tests.tds.valid && !tdsInput.value) {
+            tdsInput.value = data.manual_tests.tds.value;
+        }
         if (data.manual_tests.alkalinity.valid && !alkInput.value) {
             alkInput.value = data.manual_tests.alkalinity.value;
         }
@@ -916,7 +960,7 @@ async function fetchFuzzy() {
 
         // Update setpoints
         if (data.setpoints) {
-            document.getElementById('sp-cond').textContent = data.setpoints.conductivity;
+            document.getElementById('sp-tds').textContent = data.setpoints.tds;
             document.getElementById('sp-alk').textContent = data.setpoints.alkalinity;
             document.getElementById('sp-sulf').textContent = data.setpoints.sulfite;
             document.getElementById('sp-ph').textContent = data.setpoints.ph;
@@ -983,10 +1027,12 @@ document.getElementById('test-form').addEventListener('submit', async (e) => {
 
     const btn = e.target.querySelector('.btn-primary');
     const data = {};
+    const tds = document.getElementById('tds').value;
     const alk = document.getElementById('alkalinity').value;
     const sulf = document.getElementById('sulfite').value;
     const ph = document.getElementById('ph').value;
 
+    if (tds) data.tds = parseFloat(tds);
     if (alk) data.alkalinity = parseFloat(alk);
     if (sulf) data.sulfite = parseFloat(sulf);
     if (ph) data.ph = parseFloat(ph);
@@ -1036,6 +1082,7 @@ async function clearTests() {
 
     try {
         await fetch('/api/tests', { method: 'DELETE' });
+        document.getElementById('tds').value = '';
         document.getElementById('alkalinity').value = '';
         document.getElementById('sulfite').value = '';
         document.getElementById('ph').value = '';

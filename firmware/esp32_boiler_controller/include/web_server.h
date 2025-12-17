@@ -85,11 +85,12 @@ private:
     fuzzy_result_t _current_fuzzy_result;
 
     // Manual test values (with timestamps)
+    // ALL inputs are manual in this mode
     struct {
         float value;
         uint32_t timestamp;     // millis() when entered
         bool valid;
-    } _manual_tests[3];         // [0]=Alk, [1]=Sulfite, [2]=pH
+    } _manual_tests[4];         // [0]=TDS, [1]=Alk, [2]=Sulfite, [3]=pH
 
     // Callback
     void (*_test_input_callback)(fuzzy_input_t, float, bool);

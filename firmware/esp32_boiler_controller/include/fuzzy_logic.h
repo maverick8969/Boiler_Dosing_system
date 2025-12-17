@@ -5,15 +5,19 @@
  * Implements a Mamdani-type fuzzy inference system for intelligent
  * chemical dosing control based on multiple water quality parameters.
  *
- * Inputs:
- *   - Conductivity/TDS (from sensor)
- *   - Total Alkalinity (manual or inline sensor)
- *   - Sulfite Residual (manual or inline sensor)
- *   - pH (optional, from sensor)
- *   - Temperature (from sensor)
+ * MANUAL OPERATION MODE:
+ * All inputs except temperature are entered manually via Web UI or LCD.
+ * Blowdown output is a RECOMMENDATION only - operator controls valve.
  *
- * Outputs:
- *   - Blowdown intensity (0-100%)
+ * Inputs:
+ *   - TDS (manual entry, ppm)
+ *   - Total Alkalinity (manual entry, ppm as CaCO3)
+ *   - Sulfite Residual (manual entry, ppm SO3)
+ *   - pH (manual entry)
+ *   - Temperature (from sensor, for reference)
+ *
+ * Outputs (RECOMMENDATIONS):
+ *   - Blowdown recommendation (0-100%) - MANUAL VALVE CONTROL
  *   - NaOH dosing rate (0-100%)
  *   - Sulfite/Amine dosing rate (0-100%)
  *   - Acid dosing rate (0-100%)
@@ -38,16 +42,19 @@
 // LINGUISTIC VARIABLE INDICES
 // ============================================================================
 
-// Input variables
+// Input variables (ALL MANUAL except temperature)
 typedef enum {
-    FUZZY_IN_CONDUCTIVITY = 0,  // µS/cm (correlates to TDS)
-    FUZZY_IN_ALKALINITY,        // ppm as CaCO3
-    FUZZY_IN_SULFITE,           // ppm SO3
-    FUZZY_IN_PH,                // pH units
-    FUZZY_IN_TEMPERATURE,       // °C
-    FUZZY_IN_TREND,             // Rate of change (-100 to +100)
+    FUZZY_IN_TDS = 0,           // ppm TDS (manual entry)
+    FUZZY_IN_ALKALINITY,        // ppm as CaCO3 (manual entry)
+    FUZZY_IN_SULFITE,           // ppm SO3 (manual entry)
+    FUZZY_IN_PH,                // pH units (manual entry)
+    FUZZY_IN_TEMPERATURE,       // °C (from sensor)
+    FUZZY_IN_TREND,             // Rate of change (calculated from TDS history)
     FUZZY_INPUT_COUNT
 } fuzzy_input_t;
+
+// Backwards compatibility alias
+#define FUZZY_IN_CONDUCTIVITY FUZZY_IN_TDS
 
 // Output variables
 typedef enum {

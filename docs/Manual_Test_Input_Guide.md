@@ -2,7 +2,13 @@
 
 ## Overview
 
-The boiler controller supports both automatic sensor readings and manual test inputs. Since alkalinity, sulfite, and pH typically require titration or colorimetric tests, these values are entered manually through either:
+The boiler controller is designed for **manual operation mode** where all water chemistry parameters except temperature are entered manually via test results. This approach is common for smaller boiler systems where:
+
+- TDS/conductivity meters are tested periodically rather than continuously
+- Alkalinity, sulfite, and pH require titration or colorimetric tests
+- Operators want full visibility and control over the dosing process
+
+Test values are entered through:
 
 1. **Web Interface** - Mobile-friendly webpage at `http://<controller-ip>/`
 2. **LCD Menu** - Navigate to Manual Test Input menu
@@ -11,11 +17,20 @@ The boiler controller supports both automatic sensor readings and manual test in
 
 | Parameter | Source | Frequency |
 |-----------|--------|-----------|
-| Conductivity | Automatic (Sensorex sensor) | Continuous |
+| TDS | Manual test (meter/titration) | Daily or as needed |
 | Temperature | Automatic (Pt1000 RTD) | Continuous |
 | Alkalinity | Manual test (titration) | Daily or as needed |
 | Sulfite | Manual test (titration/test kit) | Daily or as needed |
-| pH | Manual test or sensor | Daily or continuous |
+| pH | Manual test (meter/strips) | Daily or as needed |
+
+## Manual Blowdown Control
+
+**Important:** Blowdown output is a **RECOMMENDATION** only. The operator manually controls the blowdown valve based on the fuzzy logic recommendation. This design ensures:
+
+- Operator oversight of all blowdown operations
+- Safety verification before each blowdown cycle
+- Ability to adjust based on real-world conditions
+- No unattended automated water discharge
 
 ## How Limited Inputs Affect Control
 
@@ -25,9 +40,9 @@ The fuzzy controller calculates a **confidence level** based on available inputs
 
 | Valid Inputs | Confidence | Control Behavior |
 |--------------|------------|------------------|
-| 4 (all) | **HIGH** | Full multi-parameter optimization |
+| 4 (all: TDS, Alk, Sulfite, pH) | **HIGH** | Full multi-parameter optimization |
 | 2-3 | **MEDIUM** | Partial optimization, some assumptions |
-| 1 (conductivity only) | **LOW** | Basic blowdown control only |
+| 0-1 | **LOW** | Limited control, mostly assumptions |
 
 ### Default Assumptions for Missing Inputs
 
@@ -41,36 +56,37 @@ Missing Input → Assumed "Normal" → Membership = 1.0 for Normal set
 
 | Missing Input | Assumption | Effect on Control |
 |---------------|------------|-------------------|
+| TDS | Normal (2500 ppm) | No blowdown recommendation, dosing unaffected |
 | Alkalinity | Normal (300 ppm) | No caustic adjustment, blowdown unaffected |
 | Sulfite | Normal (30 ppm) | Maintenance sulfite dosing only |
 | pH | Normal (11.0) | No acid/caustic pH correction |
 
 ### Rule Activation with Limited Inputs
 
-**Example 1: Conductivity Only (LOW confidence)**
+**Example 1: TDS Only (LOW confidence)**
 
-Only conductivity-based rules fire with full strength:
+Only TDS-based rules fire with full strength:
 ```
-Rule 1: IF Cond=VeryHigh THEN Blowdown=VeryHigh  ✓ Active
-Rule 2: IF Cond=High THEN Blowdown=High          ✓ Active
-Rule 6: IF Alk=VeryLow THEN Caustic=VeryHigh     ✗ Alk assumed Normal
+Rule 1: IF TDS=VeryHigh THEN Blowdown=VeryHigh  ✓ Active
+Rule 2: IF TDS=High THEN Blowdown=High          ✓ Active
+Rule 6: IF Alk=VeryLow THEN Caustic=VeryHigh    ✗ Alk assumed Normal
 Rule 11: IF Sulfite=VeryLow THEN Sulfite=VeryHigh ✗ Sulfite assumed Normal
 ```
 
-Result: Blowdown control works correctly, but chemical dosing stays at maintenance levels.
+Result: Blowdown recommendation works, but chemical dosing stays at maintenance levels.
 
-**Example 2: Conductivity + Alkalinity (MEDIUM confidence)**
+**Example 2: TDS + Alkalinity (MEDIUM confidence)**
 
 ```
-Inputs: Cond=2800 (High=0.7), Alk=180 (Low=0.8), Sulfite=Unknown
+Inputs: TDS=2800 (High=0.7), Alk=180 (Low=0.8), Sulfite=Unknown
 
 Active Rules:
-- Rule 2: IF Cond=High THEN Blowdown=High (0.7)
+- Rule 2: IF TDS=High THEN Blowdown=High (0.7)
 - Rule 7: IF Alk=Low THEN Caustic=High (0.8)
 - Rule 13: IF Sulfite=Normal THEN Sulfite=Low (1.0) ← maintenance
 
-Result:
-- Blowdown: 58% (responding to high conductivity)
+Result (Recommendations):
+- Blowdown: 58% (responding to high TDS)
 - Caustic: 72% (responding to low alkalinity)
 - Sulfite: 25% (maintenance level, unknown actual need)
 ```
@@ -78,17 +94,17 @@ Result:
 **Example 3: All Inputs (HIGH confidence)**
 
 ```
-Inputs: Cond=2800 (High=0.7), Alk=180 (Low=0.8),
+Inputs: TDS=2800 (High=0.7), Alk=180 (Low=0.8),
         Sulfite=15 (VeryLow=0.9), pH=10.8 (Normal=0.6)
 
 Active Rules (partial list):
 - Rule 2: Blowdown=High (0.7)
 - Rule 7: Caustic=High (0.8)
 - Rule 11: Sulfite=VeryHigh (0.9)
-- Rule 22: IF Cond=Low AND Alk=Low THEN Caustic=High (0.0 - not matching)
+- Rule 22: IF TDS=Low AND Alk=Low THEN Caustic=High (0.0 - not matching)
 
-Result:
-- Blowdown: 58%
+Result (Recommendations):
+- Blowdown: 58% (operator controls valve manually)
 - Caustic: 72%
 - Sulfite: 85% (correctly responding to very low sulfite!)
 - Acid: 5% (pH is normal)
@@ -97,18 +113,18 @@ Result:
 ## Recommended Testing Schedule
 
 ### Minimum (LOW confidence operation)
-- Conductivity: Automatic ✓
-- Weekly: pH, Alkalinity, Sulfite checks
+- Temperature: Automatic ✓
+- Weekly: TDS, pH, Alkalinity, Sulfite checks
 
 ### Standard (MEDIUM confidence operation)
-- Conductivity: Automatic ✓
-- Daily: Alkalinity check
+- Temperature: Automatic ✓
+- Daily: TDS, Alkalinity check
 - Every 2-3 days: Sulfite, pH
 
 ### Optimal (HIGH confidence operation)
-- Conductivity: Automatic ✓
-- Daily: Alkalinity, Sulfite, pH
-- Or: Install inline analyzers for Alk/Sulfite/pH
+- Temperature: Automatic ✓
+- Daily: TDS, Alkalinity, Sulfite, pH
+- Or: Install inline analyzers for continuous monitoring
 
 ## Test Value Expiration
 
@@ -141,15 +157,18 @@ When a value expires, the controller reverts to the "Normal" assumption and conf
 ┌─────────────────────────────────────┐
 │     Boiler Water Test Entry         │
 │                                     │
-│  Current Readings                   │
+│  Sensor Reading                     │
 │  ┌─────────────────────────────┐   │
-│  │ Conductivity    Temperature │   │
-│  │    2847            42.3     │   │
-│  │   µS/cm            °C       │   │
+│  │        Temperature          │   │
+│  │           42.3              │   │
+│  │            °C               │   │
 │  └─────────────────────────────┘   │
 │                                     │
 │  Enter Test Results                 │
 │  ┌─────────────────────────────┐   │
+│  │ TDS (ppm)                   │   │
+│  │ [   2847   ]         1h ago │   │
+│  │                              │   │
 │  │ Alkalinity (ppm CaCO₃)      │   │
 │  │ [    285    ]        2h ago │   │
 │  │                              │   │
@@ -165,7 +184,7 @@ When a value expires, the controller reverts to the "Normal" assumption and conf
 │  Control Recommendations            │
 │  Confidence: [HIGH]                 │
 │  ┌─────────────────────────────┐   │
-│  │ Blowdown    ████████░░  32% │   │
+│  │ Blowdown REC███████░░  32% │   │
 │  │ Caustic     ██░░░░░░░░  12% │   │
 │  │ Sulfite     ███████░░░  48% │   │
 │  │ Acid        ░░░░░░░░░░   0% │   │
@@ -173,6 +192,9 @@ When a value expires, the controller reverts to the "Normal" assumption and conf
 │  Active Rules: 8                    │
 └─────────────────────────────────────┘
 ```
+
+> **Note:** The "REC" badge on Blowdown indicates this is a recommendation only.
+> The operator must manually control the blowdown valve.
 
 ### API Endpoints
 
@@ -190,7 +212,14 @@ For integration with other systems:
 ```bash
 curl -X POST http://192.168.1.100/api/tests \
   -H "Content-Type: application/json" \
-  -d '{"alkalinity": 285, "sulfite": 32, "ph": 10.9}'
+  -d '{"tds": 2847, "alkalinity": 285, "sulfite": 32, "ph": 10.9}'
+```
+
+**Example: Submit TDS only**
+```bash
+curl -X POST http://192.168.1.100/api/tests \
+  -H "Content-Type: application/json" \
+  -d '{"tds": 2650}'
 ```
 
 ## Safety Considerations
@@ -200,30 +229,45 @@ curl -X POST http://192.168.1.100/api/tests \
 1. **Over-treatment risk**: Unknown low sulfite → actual corrosion risk
 2. **Under-treatment risk**: Unknown high alkalinity → scale formation
 3. **Chemical waste**: Maintenance dosing when not needed
+4. **TDS buildup**: Without regular TDS testing, scale can form before detection
 
 ### Recommendations
 
 - Never operate at LOW confidence for extended periods
 - If unable to test daily, consider conservative setpoints
-- Install at least one additional sensor (pH recommended) for MEDIUM confidence baseline
+- Test TDS at least daily to maintain proper blowdown cycles
+- Keep a testing log to track trends over time
 
-### Override Behavior
+### Manual Blowdown Safety
 
-High-high conductivity alarm **always** triggers maximum blowdown regardless of fuzzy output or confidence level. This is a safety interlock that cannot be disabled.
+Since blowdown is manually controlled:
+- Always verify boiler level before blowdown
+- Never leave blowdown valve unattended while open
+- Follow the recommendation percentage as a guide
+- Consider water conditions when determining blowdown duration
 
 ## Troubleshooting
 
 ### "Confidence: LOW" persistently
-- Check if test values were entered
-- Check if values expired (see age indicator)
+- Check if test values were entered (TDS, Alkalinity, Sulfite, pH)
+- Check if values expired (see age indicator next to each field)
+- Need at least 2 valid inputs for MEDIUM confidence
 - Verify web interface can reach controller
 
 ### Chemical dosing seems wrong
 - Compare test values to setpoints in "Target Ranges" section
 - Check if rules are firing as expected (Active Rules count)
 - With limited inputs, controller may be making incorrect assumptions
+- Ensure TDS value is entered - it affects blowdown recommendations
+
+### Blowdown recommendation doesn't match expectations
+- Remember: blowdown is manual - the value is only a recommendation
+- Check TDS value is current and accurate
+- High TDS should show high blowdown recommendation
+- Low TDS should show low/zero blowdown recommendation
 
 ### Test values not updating
 - Clear browser cache
 - Check controller WiFi connection
 - Verify POST request succeeds (check browser console)
+- Ensure values are within valid ranges (TDS: 0-5000, Alk: 0-1000, etc.)

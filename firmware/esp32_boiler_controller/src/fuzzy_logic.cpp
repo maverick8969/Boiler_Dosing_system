@@ -55,11 +55,11 @@ bool FuzzyController::begin(fuzzy_config_t* config) {
 // ============================================================================
 
 void FuzzyController::initInputVariables() {
-    // CONDUCTIVITY (µS/cm) - typical range 500-4000 for boilers
-    _inputs[FUZZY_IN_CONDUCTIVITY].name = "Conductivity";
-    _inputs[FUZZY_IN_CONDUCTIVITY].min_value = 0;
-    _inputs[FUZZY_IN_CONDUCTIVITY].max_value = 5000;
-    _inputs[FUZZY_IN_CONDUCTIVITY].num_sets = 5;
+    // TDS (ppm) - manual entry, typical range 500-3000 for boilers
+    _inputs[FUZZY_IN_TDS].name = "TDS";
+    _inputs[FUZZY_IN_TDS].min_value = 0;
+    _inputs[FUZZY_IN_TDS].max_value = 5000;
+    _inputs[FUZZY_IN_TDS].num_sets = 5;
 
     // ALKALINITY (ppm as CaCO3) - typical range 100-700
     _inputs[FUZZY_IN_ALKALINITY].name = "Alkalinity";
@@ -156,15 +156,16 @@ void FuzzyController::updateMembershipFunctions() {
 
     float sp, db;
 
-    // CONDUCTIVITY membership functions (centered on setpoint)
+    // TDS membership functions (centered on setpoint)
+    // Note: Config uses cond_setpoint for TDS target (ppm)
     sp = _config->cond_setpoint;
     db = _config->cond_deadband;
 
-    _inputs[FUZZY_IN_CONDUCTIVITY].sets[0] = {MF_TRAPEZOIDAL, {0, 0, sp*0.5f, sp*0.7f}, "VeryLow"};
-    _inputs[FUZZY_IN_CONDUCTIVITY].sets[1] = {MF_TRIANGULAR, {sp*0.5f, sp*0.75f, sp-db}, "Low"};
-    _inputs[FUZZY_IN_CONDUCTIVITY].sets[2] = {MF_TRIANGULAR, {sp-db*2, sp, sp+db*2}, "Normal"};
-    _inputs[FUZZY_IN_CONDUCTIVITY].sets[3] = {MF_TRIANGULAR, {sp+db, sp*1.25f, sp*1.5f}, "High"};
-    _inputs[FUZZY_IN_CONDUCTIVITY].sets[4] = {MF_TRAPEZOIDAL, {sp*1.3f, sp*1.5f, 5000, 5000}, "VeryHigh"};
+    _inputs[FUZZY_IN_TDS].sets[0] = {MF_TRAPEZOIDAL, {0, 0, sp*0.5f, sp*0.7f}, "VeryLow"};
+    _inputs[FUZZY_IN_TDS].sets[1] = {MF_TRIANGULAR, {sp*0.5f, sp*0.75f, sp-db}, "Low"};
+    _inputs[FUZZY_IN_TDS].sets[2] = {MF_TRIANGULAR, {sp-db*2, sp, sp+db*2}, "Normal"};
+    _inputs[FUZZY_IN_TDS].sets[3] = {MF_TRIANGULAR, {sp+db, sp*1.25f, sp*1.5f}, "High"};
+    _inputs[FUZZY_IN_TDS].sets[4] = {MF_TRAPEZOIDAL, {sp*1.3f, sp*1.5f, 5000, 5000}, "VeryHigh"};
 
     // ALKALINITY membership functions
     sp = _config->alk_setpoint;
@@ -402,35 +403,46 @@ fuzzy_result_t FuzzyController::evaluate(const fuzzy_inputs_t& inputs) {
 
     if (!_config) return result;
 
-    // Step 1: Fuzzify all inputs
-    fuzzify(FUZZY_IN_CONDUCTIVITY, inputs.conductivity, _input_membership[FUZZY_IN_CONDUCTIVITY]);
+    // Step 1: Fuzzify all inputs (ALL MANUAL except temperature)
 
-    if (inputs.alkalinity_valid || _manual_valid[FUZZY_IN_ALKALINITY]) {
-        float alk = _manual_valid[FUZZY_IN_ALKALINITY] ? _manual_values[FUZZY_IN_ALKALINITY] : inputs.alkalinity;
-        fuzzify(FUZZY_IN_ALKALINITY, alk, _input_membership[FUZZY_IN_ALKALINITY]);
+    // TDS - manual entry required
+    if (_manual_valid[FUZZY_IN_TDS]) {
+        fuzzify(FUZZY_IN_TDS, _manual_values[FUZZY_IN_TDS], _input_membership[FUZZY_IN_TDS]);
+    } else {
+        // Unknown TDS - assume normal (conservative)
+        memset(_input_membership[FUZZY_IN_TDS], 0, sizeof(_input_membership[0]));
+        _input_membership[FUZZY_IN_TDS][2] = 1.0f;  // Normal
+    }
+
+    // Alkalinity - manual entry required
+    if (_manual_valid[FUZZY_IN_ALKALINITY]) {
+        fuzzify(FUZZY_IN_ALKALINITY, _manual_values[FUZZY_IN_ALKALINITY], _input_membership[FUZZY_IN_ALKALINITY]);
     } else {
         // Unknown alkalinity - assume normal
         memset(_input_membership[FUZZY_IN_ALKALINITY], 0, sizeof(_input_membership[0]));
         _input_membership[FUZZY_IN_ALKALINITY][2] = 1.0f;  // Normal
     }
 
-    if (inputs.sulfite_valid || _manual_valid[FUZZY_IN_SULFITE]) {
-        float sulf = _manual_valid[FUZZY_IN_SULFITE] ? _manual_values[FUZZY_IN_SULFITE] : inputs.sulfite;
-        fuzzify(FUZZY_IN_SULFITE, sulf, _input_membership[FUZZY_IN_SULFITE]);
+    // Sulfite - manual entry required
+    if (_manual_valid[FUZZY_IN_SULFITE]) {
+        fuzzify(FUZZY_IN_SULFITE, _manual_values[FUZZY_IN_SULFITE], _input_membership[FUZZY_IN_SULFITE]);
     } else {
         memset(_input_membership[FUZZY_IN_SULFITE], 0, sizeof(_input_membership[0]));
         _input_membership[FUZZY_IN_SULFITE][2] = 1.0f;
     }
 
-    if (inputs.ph_valid || _manual_valid[FUZZY_IN_PH]) {
-        float ph = _manual_valid[FUZZY_IN_PH] ? _manual_values[FUZZY_IN_PH] : inputs.ph;
-        fuzzify(FUZZY_IN_PH, ph, _input_membership[FUZZY_IN_PH]);
+    // pH - manual entry required
+    if (_manual_valid[FUZZY_IN_PH]) {
+        fuzzify(FUZZY_IN_PH, _manual_values[FUZZY_IN_PH], _input_membership[FUZZY_IN_PH]);
     } else {
         memset(_input_membership[FUZZY_IN_PH], 0, sizeof(_input_membership[0]));
         _input_membership[FUZZY_IN_PH][2] = 1.0f;
     }
 
+    // Temperature - from sensor (for reference only in manual mode)
     fuzzify(FUZZY_IN_TEMPERATURE, inputs.temperature, _input_membership[FUZZY_IN_TEMPERATURE]);
+
+    // Trend - calculated from TDS history (or zero if insufficient data)
     fuzzify(FUZZY_IN_TREND, inputs.cond_trend, _input_membership[FUZZY_IN_TREND]);
 
     // Step 2: Apply rules and aggregate outputs
