@@ -168,13 +168,31 @@
 // Alternative configuration for simpler 4-button interface below
 
 // ============================================================================
-// SIMPLIFIED BUTTON INTERFACE (Alternative to full keypad)
+// ROTARY ENCODER INTERFACE (Primary Navigation)
 // ============================================================================
+// KY-040 style rotary encoder with push button
+// Uses hardware interrupts for reliable rotation detection
 
-#define BTN_UP_PIN              GPIO_NUM_15
-#define BTN_DOWN_PIN            GPIO_NUM_2
-#define BTN_ENTER_PIN           GPIO_NUM_0
-#define BTN_MENU_PIN            GPIO_NUM_19
+#define ENCODER_PIN_A           GPIO_NUM_15   // CLK - Encoder output A
+#define ENCODER_PIN_B           GPIO_NUM_2    // DT  - Encoder output B
+#define ENCODER_BUTTON_PIN      GPIO_NUM_0    // SW  - Push button (active LOW)
+
+// Encoder Configuration
+#define ENCODER_STEPS_PER_NOTCH 4             // Pulses per detent (typical for KY-040)
+#define ENCODER_DEBOUNCE_MS     5             // Debounce time for rotation
+#define ENCODER_BTN_DEBOUNCE_MS 50            // Debounce time for button
+#define ENCODER_LONG_PRESS_MS   1500          // Long press threshold
+#define ENCODER_DOUBLE_PRESS_MS 300           // Double press window
+
+// ============================================================================
+// SIMPLIFIED BUTTON INTERFACE (Alternative to rotary encoder)
+// ============================================================================
+// Use these if not using rotary encoder
+
+#define BTN_UP_PIN              GPIO_NUM_15   // Shared with ENCODER_PIN_A
+#define BTN_DOWN_PIN            GPIO_NUM_2    // Shared with ENCODER_PIN_B
+#define BTN_ENTER_PIN           GPIO_NUM_0    // Shared with ENCODER_BUTTON_PIN
+#define BTN_MENU_PIN            GPIO_NUM_19   // Additional menu button (optional)
 
 // ============================================================================
 // WIFI INDICATOR
@@ -224,18 +242,18 @@
 /*
 | GPIO | Function              | Direction | Notes                    |
 |------|-----------------------|-----------|--------------------------|
-| 0    | BTN_ENTER / Boot      | Input     | Strapping pin, pull-up   |
-| 2    | BTN_DOWN / Built-in LED| I/O      | Strapping pin            |
+| 0    | ENCODER_BUTTON        | Input     | Push button (strapping!) |
+| 2    | ENCODER_PIN_B (DT)    | Input     | Encoder output B         |
 | 4    | BLOWDOWN_RELAY        | Output    | Relay driver             |
 | 5    | WS2812_DATA           | Output    | LED strip                |
 | 12   | STEPPER1_STEP         | Output    | H2SO3 pump step          |
 | 13   | STEPPER_ENABLE        | Output    | Common enable (active LOW)|
 | 14   | STEPPER1_DIR          | Output    | H2SO3 pump direction     |
-| 15   | BTN_UP                | Input     | Pull-up                  |
+| 15   | ENCODER_PIN_A (CLK)   | Input     | Encoder output A         |
 | 16   | BLOWDOWN_NO           | Output    | Optional dual relay      |
 | 17   | AUX_INPUT1            | Input     | Drum level 1             |
 | 18   | AUX_INPUT2            | Input     | Drum level 2             |
-| 19   | BTN_MENU              | Input     | Pull-up                  |
+| 19   | BTN_MENU (optional)   | Input     | Extra button             |
 | 21   | I2C_SDA               | I/O       | LCD, sensors             |
 | 22   | I2C_SCL               | Output    | LCD, sensors             |
 | 25   | COND_EXCITE (DAC1)    | Output    | Conductivity excitation  |
