@@ -1,5 +1,5 @@
 /**
- * @file test_integration.ino
+ * @file test_integration.cpp
  * @brief Full system integration test program
  *
  * Tests all subsystems together:
@@ -22,6 +22,25 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <WiFi.h>
+
+// ============================================================================
+// FORWARD DECLARATIONS
+// ============================================================================
+
+void printMenu();
+void processCommand(char cmd);
+void addResult(const char* name, bool passed, const char* message);
+void testI2CBus();
+void testAnalogInputs();
+void testDigitalInputs();
+void testRelayOutputs();
+void testStepperMotors();
+void testWaterMeter();
+void testWiFi();
+void runAllTests();
+void runSimulation();
+void printTestReport();
+void clearResults();
 
 // ============================================================================
 // PIN DEFINITIONS

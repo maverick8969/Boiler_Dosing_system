@@ -1,5 +1,5 @@
 /**
- * @file test_fuzzy_logic.ino
+ * @file test_fuzzy_logic.cpp
  * @brief Test program for fuzzy logic controller
  *
  * Tests:
@@ -15,6 +15,25 @@
  */
 
 #include <Arduino.h>
+
+// ============================================================================
+// FORWARD DECLARATIONS
+// ============================================================================
+
+void printMenu();
+void printConfig();
+void processCommand(String cmd);
+void setTDS(float value);
+void setAlkalinity(float value);
+void setSulfite(float value);
+void setPH(float value);
+void clearInputs();
+void evaluateAndDisplay();
+void evaluateFuzzy();
+void printInputs();
+void printOutputs();
+void runTestScenarios();
+void testMembership();
 
 // ============================================================================
 // SIMPLIFIED FUZZY LOGIC IMPLEMENTATION FOR TESTING

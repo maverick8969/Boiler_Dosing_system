@@ -1,5 +1,5 @@
 /**
- * @file test_conductivity_sensor.ino
+ * @file test_conductivity_sensor.cpp
  * @brief Test program for conductivity and temperature sensors
  *
  * Tests:
@@ -21,6 +21,23 @@
  */
 
 #include <Arduino.h>
+
+// ============================================================================
+// FORWARD DECLARATIONS
+// ============================================================================
+
+void printMenu();
+void processCommand(char cmd);
+void readAndDisplaySensors();
+float readConductivityRaw();
+float readTemperature();
+float temperatureCompensate(float conductivity, float temperature);
+void testTemperatureSensor();
+void testExcitation();
+void testADCRaw();
+void calibrateWithStandard(int standardValue);
+void resetCalibration();
+void printStatus();
 
 // ============================================================================
 // PIN DEFINITIONS

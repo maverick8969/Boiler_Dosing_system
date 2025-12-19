@@ -1,5 +1,5 @@
 /**
- * @file test_wifi_api.ino
+ * @file test_wifi_api.cpp
  * @brief Test program for WiFi connectivity and API communication
  *
  * Tests:
@@ -22,6 +22,27 @@
 #include <HTTPClient.h>
 #include <WebServer.h>
 #include <ArduinoJson.h>
+
+// ============================================================================
+// FORWARD DECLARATIONS
+// ============================================================================
+
+void printMenu();
+void processCommand(char cmd);
+void connectWiFi();
+void disconnectWiFi();
+void startAPMode();
+void scanNetworks();
+void printNetworkInfo();
+void pingBackend();
+void testPostData();
+void testPostFuzzy();
+void testGetLatest();
+void stressTestAPI();
+void startLocalServer();
+void handleRoot();
+void handleStatus();
+void handleNotFound();
 
 // ============================================================================
 // CONFIGURATION - EDIT THESE

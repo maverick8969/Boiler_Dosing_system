@@ -1,5 +1,5 @@
 /**
- * @file test_stepper_pumps.ino
+ * @file test_stepper_pumps.cpp
  * @brief Test program for stepper motor chemical pumps
  *
  * Tests:
@@ -22,6 +22,22 @@
 
 #include <Arduino.h>
 #include <AccelStepper.h>
+
+// ============================================================================
+// FORWARD DECLARATIONS
+// ============================================================================
+
+void printMenu();
+void processCommand(char cmd);
+void toggleEnable();
+void runPump(int pumpIndex, long steps);
+void runAllPumps(long steps);
+void runRevolution(int pumpIndex);
+void runAllRevolutions();
+void runCalibration();
+void adjustSpeed(int delta);
+void stopAll();
+void printStatus();
 
 // ============================================================================
 // PIN DEFINITIONS (Match your hardware)

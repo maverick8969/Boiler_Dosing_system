@@ -1,5 +1,5 @@
 /**
- * @file test_water_meter.ino
+ * @file test_water_meter.cpp
  * @brief Test program for water meter pulse input
  *
  * Tests:
@@ -19,6 +19,21 @@
  */
 
 #include <Arduino.h>
+
+// ============================================================================
+// FORWARD DECLARATIONS
+// ============================================================================
+
+void printMenu();
+void processCommand(char cmd);
+void calculateFlowRates();
+void displayStatus();
+void simulatePulses(int meter, int count);
+void testFlowSimulation();
+void resetCounters();
+void saveToTotalizer();
+void testTotalizer();
+void testInputState();
 
 // ============================================================================
 // PIN DEFINITIONS

@@ -1,5 +1,5 @@
 /**
- * @file test_gpio_pins.ino
+ * @file test_gpio_pins.cpp
  * @brief Test program for all GPIO pins and peripherals
  *
  * Tests:
@@ -17,6 +17,23 @@
 
 #include <Arduino.h>
 #include <Wire.h>
+
+// ============================================================================
+// FORWARD DECLARATIONS
+// ============================================================================
+
+void printMenu();
+void printPinMap();
+void processCommand(char cmd);
+void testAllOutputs();
+void testAllInputs();
+void testAllADC();
+void testRelays();
+void testStepperPins();
+void testButtons();
+void continuousInputMonitor();
+void wiggleAllOutputs();
+void scanI2C();
 
 // ============================================================================
 // PIN DEFINITIONS - MATCH YOUR HARDWARE

@@ -1,5 +1,5 @@
 /**
- * @file test_lcd_display.ino
+ * @file test_lcd_display.cpp
  * @brief Test program for 20x4 I2C LCD display
  *
  * Tests:
@@ -22,6 +22,24 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
+
+// ============================================================================
+// FORWARD DECLARATIONS
+// ============================================================================
+
+void printMenu();
+void processCommand(char cmd);
+void scanI2C();
+void testClear();
+void toggleBacklight();
+void testAllCharacters();
+void testCustomCharacters();
+void testProgressBar();
+void testMainScreen();
+void testAlarmScreen();
+void testScrolling();
+void testRandomData();
+void testLineByLine();
 
 // ============================================================================
 // PIN DEFINITIONS
