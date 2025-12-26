@@ -1,0 +1,67 @@
+version: '3.8'
+
+services:
+  # TimescaleDB - Time-series database for sensor data
+  timescaledb:
+    image: timescale/timescaledb:latest-pg15
+    container_name: boiler_timescaledb
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: boiler
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-boiler_secret_123}
+      POSTGRES_DB: boiler_data
+    volumes:
+      - timescale_data:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U boiler -d boiler_data"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # API Server - Receives data from ESP32
+  api:
+    build: ./api
+    container_name: boiler_api
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      DB_HOST: timescaledb
+      DB_PORT: 5432
+      DB_USER: boiler
+      DB_PASSWORD: ${DB_PASSWORD:-boiler_secret_123}
+      DB_NAME: boiler_data
+      API_KEY: ${API_KEY:-esp32_api_key_change_me}
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+
+  # Grafana - Visualization dashboards
+  grafana:
+    image: grafana/grafana:latest
+    container_name: boiler_grafana
+    restart: unless-stopped
+    ports:
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin123}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SERVER_ROOT_URL: http://localhost:3001
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+
+volumes:
+  timescale_data:
+    driver: local
+  grafana_data:
+    driver: local
