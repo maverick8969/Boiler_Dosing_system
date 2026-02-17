@@ -20,6 +20,7 @@
 #include <Arduino.h>
 #include <Preferences.h>
 #include <Wire.h>
+#include <SPI.h>
 
 #include "config.h"
 #include "pin_definitions.h"
@@ -29,17 +30,18 @@
 #include "blowdown.h"
 #include "display.h"
 #include "data_logger.h"
+#include "sd_logger.h"
 #include "fuzzy_logic.h"
 
 // ============================================================================
 // GLOBAL INSTANCES
 // ============================================================================
 
-// Conductivity sensor (Atlas Scientific EZO-EC via UART + Adafruit MAX31865 PT1000 RTD via SPI)
+// Conductivity sensor (Atlas Scientific EZO-EC via UART + Adafruit MAX31865 PT1000 RTD via hardware VSPI)
 ConductivitySensor conductivitySensor(
     Serial2,
     EZO_EC_RX_PIN, EZO_EC_TX_PIN,
-    MAX31865_CS_PIN, MAX31865_MOSI_PIN, MAX31865_MISO_PIN, MAX31865_SCK_PIN
+    MAX31865_CS_PIN  // Hardware SPI — shares VSPI bus with SD card
 );
 
 // System configuration (stored in NVS)
@@ -50,6 +52,9 @@ system_state_t_runtime systemState;
 
 // NVS for persistent storage
 Preferences preferences;
+
+// SPI bus mutex (shared VSPI: MAX31865 + SD card)
+SemaphoreHandle_t spiMutex = NULL;
 
 // Task handles for FreeRTOS
 TaskHandle_t taskControl = NULL;
@@ -97,6 +102,12 @@ void setup() {
     Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
     Wire.setClock(I2C_FREQ);
 
+    // Initialize shared VSPI bus (MAX31865 + SD card)
+    SPI.begin(MAX31865_SCK_PIN, MAX31865_MISO_PIN, MAX31865_MOSI_PIN);
+    spiMutex = xSemaphoreCreateMutex();
+    Serial.printf("VSPI bus: SCK=%d, MISO=%d, MOSI=%d (shared: MAX31865 + SD)\n",
+                  MAX31865_SCK_PIN, MAX31865_MISO_PIN, MAX31865_MOSI_PIN);
+
     // Load configuration from NVS
     loadConfiguration();
 
@@ -109,7 +120,7 @@ void setup() {
     }
     display.showMessage("Initializing...", "Please wait");
 
-    // Conductivity sensor
+    // Conductivity sensor (hardware SPI via shared VSPI)
     if (!conductivitySensor.begin()) {
         Serial.println("ERROR: Conductivity sensor initialization failed!");
         display.showAlarm("SENSOR ERROR");
@@ -151,6 +162,14 @@ void setup() {
             display.showMessage("WiFi Failed", "Running offline");
             delay(2000);
         }
+    }
+
+    // SD card logger (shares VSPI bus with MAX31865)
+    if (!sdLogger.begin(SD_CS_PIN, SPI, spiMutex)) {
+        Serial.println("WARNING: SD card not available — logging to WiFi/buffer only");
+    } else {
+        display.showMessage("SD Card OK", sdLogger.getCurrentFilename());
+        delay(500);
     }
 
     // Initialize feedwater pump monitor input (optocoupler output, external 10k pull-up)
@@ -312,14 +331,17 @@ void taskMeasurementLoop(void* parameter) {
     TickType_t lastWakeTime = xTaskGetTickCount();
 
     while (true) {
-        // Read conductivity sensor
-        conductivity_reading_t reading = conductivitySensor.read();
+        // Read conductivity sensor (acquires shared SPI bus for MAX31865)
+        if (xSemaphoreTake(spiMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+            conductivity_reading_t reading = conductivitySensor.read();
+            xSemaphoreGive(spiMutex);
 
-        // Update system state
-        systemState.conductivity_raw = reading.raw_conductivity;
-        systemState.conductivity_compensated = reading.temp_compensated;
-        systemState.conductivity_calibrated = reading.calibrated;
-        systemState.temperature_celsius = reading.temperature_c;
+            // Update system state
+            systemState.conductivity_raw = reading.raw_conductivity;
+            systemState.conductivity_compensated = reading.temp_compensated;
+            systemState.conductivity_calibrated = reading.calibrated;
+            systemState.temperature_celsius = reading.temperature_c;
+        }
 
         // Update water meters
         waterMeterManager.update();
@@ -348,6 +370,9 @@ void taskLoggingLoop(void* parameter) {
     while (true) {
         // Update data logger (handle WiFi reconnection, etc.)
         dataLogger.update();
+
+        // Update SD logger (periodic flush)
+        sdLogger.update();
 
         // Log sensor data at configured interval
         uint32_t now = millis();
@@ -661,7 +686,11 @@ void logSensorData() {
     reading.fw_pump_on_time_sec = systemState.fw_pump_on_time_sec;
     reading.active_alarms = systemState.active_alarms;
 
+    // Log to TimescaleDB (via WiFi) and/or RAM buffer
     dataLogger.logReading(&reading);
+
+    // Log to SD card (always-on local storage)
+    sdLogger.logReading(&reading);
 }
 
 // ============================================================================
@@ -692,6 +721,8 @@ void updateFeedwaterPumpMonitor() {
             Serial.printf("[FW PUMP] ON  — cycle #%u\n", systemState.fw_pump_cycle_count);
             dataLogger.logEvent("FW_PUMP_ON", "Feedwater pump started",
                                 systemState.fw_pump_cycle_count);
+            sdLogger.logEvent("FW_PUMP_ON", "Feedwater pump started",
+                              systemState.fw_pump_cycle_count);
         }
         else if (!raw && systemState.feedwater_pump_on) {
             // --- Pump just turned OFF ---
@@ -707,6 +738,7 @@ void updateFeedwaterPumpMonitor() {
                           cycle_sec, systemState.fw_pump_on_time_sec,
                           systemState.fw_pump_cycle_count);
             dataLogger.logEvent("FW_PUMP_OFF", "Feedwater pump stopped", cycle_sec);
+            sdLogger.logEvent("FW_PUMP_OFF", "Feedwater pump stopped", cycle_sec);
         }
 
         prev_state = raw;

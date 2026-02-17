@@ -17,9 +17,34 @@
 #include "pin_definitions.h"
 
 // ============================================================================
-// CONSTRUCTOR
+// CONSTRUCTORS
 // ============================================================================
 
+// Hardware SPI constructor (preferred — shares VSPI bus with SD card)
+ConductivitySensor::ConductivitySensor(
+    HardwareSerial& ezoSerial,
+    uint8_t ezoRxPin, uint8_t ezoTxPin,
+    uint8_t rtdCsPin, SPIClass* spi)
+    : _serial(ezoSerial)
+    , _rxPin(ezoRxPin)
+    , _txPin(ezoTxPin)
+    , _rtd(new Adafruit_MAX31865(rtdCsPin, spi))
+    , _config(nullptr)
+    , _calibration_percent(0)
+    , _initialized(false)
+    , _ezo_ok(false)
+    , _rtd_ok(false)
+    , _temp_comp_enabled(true)
+    , _manual_temp(EZO_DEFAULT_TEMP_C)
+    , _anti_flash_enabled(false)
+    , _anti_flash_factor(5)
+    , _anti_flash_buffer(0)
+    , _sleeping(false)
+{
+    memset(&_last_reading, 0, sizeof(_last_reading));
+}
+
+// Software SPI constructor (legacy — for standalone test programs)
 ConductivitySensor::ConductivitySensor(
     HardwareSerial& ezoSerial,
     uint8_t ezoRxPin, uint8_t ezoTxPin,
@@ -28,7 +53,7 @@ ConductivitySensor::ConductivitySensor(
     : _serial(ezoSerial)
     , _rxPin(ezoRxPin)
     , _txPin(ezoTxPin)
-    , _rtd(rtdCsPin, rtdMosiPin, rtdMisoPin, rtdSckPin)
+    , _rtd(new Adafruit_MAX31865(rtdCsPin, rtdMosiPin, rtdMisoPin, rtdSckPin))
     , _config(nullptr)
     , _calibration_percent(0)
     , _initialized(false)
@@ -92,7 +117,7 @@ bool ConductivitySensor::begin() {
     if (cfgWires == 3) wireConfig = MAX31865_3WIRE;
     else if (cfgWires == 4) wireConfig = MAX31865_4WIRE;
 
-    if (!_rtd.begin(wireConfig)) {
+    if (!_rtd->begin(wireConfig)) {
         _rtd_ok = false;
         Serial.println("  WARNING: MAX31865 initialization failed");
     } else {
@@ -103,9 +128,9 @@ bool ConductivitySensor::begin() {
             Serial.printf("  MAX31865 PT1000 OK, current temp: %.1f C\n", temp);
         } else {
             _rtd_ok = false;
-            uint8_t fault = _rtd.readFault();
+            uint8_t fault = _rtd->readFault();
             Serial.printf("  WARNING: MAX31865 RTD fault: 0x%02X\n", fault);
-            _rtd.clearFault();
+            _rtd->clearFault();
         }
     }
 
@@ -233,10 +258,10 @@ float ConductivitySensor::readTemperature() {
     float rtdNominal = (_config) ? _config->rtd_nominal : RTD_NOMINAL_RESISTANCE;
     float rtdRef = (_config) ? _config->rtd_reference : RTD_REFERENCE_RESISTOR;
 
-    float temp = _rtd.temperature(rtdNominal, rtdRef);
+    float temp = _rtd->temperature(rtdNominal, rtdRef);
 
     // Check for RTD faults
-    uint8_t fault = _rtd.readFault();
+    uint8_t fault = _rtd->readFault();
     if (fault) {
         Serial.printf("MAX31865 fault: 0x%02X - ", fault);
         if (fault & MAX31865_FAULT_HIGHTHRESH) Serial.print("RTD High Threshold ");
@@ -246,7 +271,7 @@ float ConductivitySensor::readTemperature() {
         if (fault & MAX31865_FAULT_RTDINLOW)   Serial.print("RTDIN- < 0.85 x Bias (FORCE- open) ");
         if (fault & MAX31865_FAULT_OVUV)       Serial.print("Under/Over voltage ");
         Serial.println();
-        _rtd.clearFault();
+        _rtd->clearFault();
         return -999.0f;
     }
 
@@ -442,7 +467,7 @@ String ConductivitySensor::getDeviceStatus() {
 }
 
 uint8_t ConductivitySensor::getRTDFault() {
-    return _rtd.readFault();
+    return _rtd->readFault();
 }
 
 // ============================================================================

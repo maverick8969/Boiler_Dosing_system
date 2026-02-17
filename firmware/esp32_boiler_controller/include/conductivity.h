@@ -16,6 +16,7 @@
 #define CONDUCTIVITY_H
 
 #include <Arduino.h>
+#include <SPI.h>
 #include <Adafruit_MAX31865.h>
 #include "config.h"
 
@@ -57,7 +58,19 @@ typedef struct {
 class ConductivitySensor {
 public:
     /**
-     * @brief Constructor
+     * @brief Constructor (hardware SPI — preferred, shares VSPI bus with SD card)
+     * @param ezoSerial HardwareSerial reference for EZO-EC UART (e.g., Serial2)
+     * @param ezoRxPin ESP32 RX pin connected to EZO TX
+     * @param ezoTxPin ESP32 TX pin connected to EZO RX
+     * @param rtdCsPin MAX31865 chip select pin
+     * @param spi Pointer to SPIClass (default &SPI = VSPI)
+     */
+    ConductivitySensor(HardwareSerial& ezoSerial,
+                        uint8_t ezoRxPin, uint8_t ezoTxPin,
+                        uint8_t rtdCsPin, SPIClass* spi = &SPI);
+
+    /**
+     * @brief Constructor (software SPI — legacy, for standalone test programs)
      * @param ezoSerial HardwareSerial reference for EZO-EC UART (e.g., Serial2)
      * @param ezoRxPin ESP32 RX pin connected to EZO TX
      * @param ezoTxPin ESP32 TX pin connected to EZO RX
@@ -300,7 +313,7 @@ private:
     HardwareSerial& _serial;
     uint8_t _rxPin;
     uint8_t _txPin;
-    Adafruit_MAX31865 _rtd;
+    Adafruit_MAX31865* _rtd;
 
     // Configuration
     conductivity_config_t* _config;

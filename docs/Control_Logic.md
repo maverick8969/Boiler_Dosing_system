@@ -204,7 +204,7 @@ Each 100 ms tick executes the following pipeline:
 
 | Method | Purpose | Inputs | Side Effects |
 |--------|---------|--------|--------------|
-| `update(conductivity, flow_ok)` | Main tick — runs state machine | float, bool | Drives GPIO4, reads ADS1115, updates `_status` |
+| `update(conductivity)` | Main tick — runs state machine | float | Drives GPIO4, reads ADS1115, updates `_status` |
 | `processHOA()` | Checks HOA mode, forces open/close/auto | — | May override state machine |
 | `processContinuousMode(cond)` | Continuous setpoint comparison | float | Transitions state |
 | `processIntermittentMode(cond)` | I/T/P interval logic | float | Manages sample/hold/blow timers |
@@ -475,12 +475,41 @@ dataLogger.update()
   ├── handleWiFiEvents()          ← auto-reconnect if disconnected
   └── uploadBuffered()            ← drain circular buffer (100 slots)
 
+sdLogger.update()
+  └── flush() every 30 seconds    ← write pending SD data to card
+
 if (millis() - lastLogTime >= log_interval_ms):
   logSensorData()
     ├── Build sensor_reading_t from systemState + subsystem getters
-    └── dataLogger.logReading(&reading)
-          ├── WiFi connected? → HTTP POST JSON to <host>:<port>
-          └── Offline?        → bufferReading() into circular buffer
+    ├── dataLogger.logReading(&reading)
+    │     ├── WiFi connected? → HTTP POST JSON to <host>:<port>
+    │     └── Offline?        → bufferReading() into circular buffer
+    └── sdLogger.logReading(&reading)
+          └── Append CSV row to /logs/YYYY-MM-DD.csv (always-on)
+```
+
+### SD Card Storage
+
+The micro-SD card provides always-on local storage independent of WiFi.
+Data is logged as CSV files organized by date.
+
+| Directory | File Pattern | Contents |
+|-----------|-------------|----------|
+| `/logs/` | `YYYY-MM-DD.csv` | Sensor readings (same fields as TimescaleDB) |
+| `/events/` | `YYYY-MM-DD_events.csv` | System events + alarms |
+| `/logs/` | `boot_NNNN.csv` | Fallback when NTP time is unavailable |
+
+The SD card shares the VSPI bus (GPIO18/23/39) with the MAX31865 PT1000 RTD.
+A FreeRTOS mutex (`spiMutex`) ensures the Measurement task (MAX31865 reads at 2 Hz)
+and Logging task (SD writes at ~1 Hz) never access the bus simultaneously.
+
+**SPI Bus Arbitration:**
+```
+Measurement task (Core 1, 2 Hz):
+  xSemaphoreTake(spiMutex) → conductivitySensor.read() → xSemaphoreGive(spiMutex)
+
+Logging task (Core 0, 1 Hz):
+  sdLogger.logReading()    → takeSPI() → SD write → giveSPI()
 ```
 
 ### Logged Fields

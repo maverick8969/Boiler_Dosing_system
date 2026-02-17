@@ -11,7 +11,9 @@
  * - 20x4 LCD Display (I2C)
  * - WS2812 RGB LED Strip for Status Indicators
  * - Sensorex CS675HTTC/P1K Conductivity Probe via Atlas Scientific EZO-EC (UART)
- * - PT1000 RTD Temperature Sensor via Adafruit MAX31865 (SPI)
+ * - PT1000 RTD Temperature Sensor via Adafruit MAX31865 (VSPI, shared bus)
+ * - Micro-SD Card Data Logger (VSPI, shared bus with MAX31865)
+ * - Feedwater Pump Monitor via PC817 Optocoupler (GPIO35)
  * - Automated Blowdown Valve (Assured Automation E26NRXS4UV-EP420C, 4-20mA)
  *
  * Based on CNC Shield V4.0 architecture adapted for ESP32
@@ -210,11 +212,20 @@
 #define USE_EXTERNAL_ADC        true          // Required for blowdown valve feedback
 
 // ============================================================================
-// SPI BUS (MAX31865 uses software SPI)
+// SPI BUS — Shared VSPI (MAX31865 + SD Card)
 // ============================================================================
-// MAX31865 PT1000 RTD uses software SPI on dedicated pins (see conductivity section).
-// GPIO23 (MOSI) and GPIO18 (SCK) are committed to the MAX31865.
-// GPIO19 is free but not assigned. Hardware VSPI is not available.
+// Both the MAX31865 PT1000 RTD and SD card module share the ESP32 hardware
+// VSPI bus. Each device has its own CS pin; a FreeRTOS mutex (spiMutex)
+// protects bus access between the Measurement and Logging tasks.
+//
+//   MOSI = GPIO23    (shared)
+//   MISO = GPIO39    (shared, input-only — fine for MISO)
+//   SCK  = GPIO18    (shared)
+//   MAX31865 CS = GPIO16
+//   SD Card  CS = GPIO19
+
+#define SD_CS_PIN               GPIO_NUM_19   // SD card chip select (VSPI)
+#define SD_SPI_FREQ             4000000       // 4 MHz SPI clock for SD card
 
 // ============================================================================
 // PIN VALIDATION
@@ -247,11 +258,11 @@
 | 15   | ENCODER_PIN_A (CLK)   | Input     | Encoder output A (strapping)        |
 | 16   | MAX31865_CS           | Output    | RTD SPI chip select                 |
 | 17   | AUX_INPUT1            | Input     | Drum level switch                   |
-| 18   | MAX31865_SCK          | Output    | RTD SPI clock                       |
-| 19   | (free)                | —         | Available for future use            |
+| 18   | VSPI_SCK              | Output    | Shared SPI clock (MAX31865 + SD)    |
+| 19   | SD_CS                 | Output    | SD card chip select (VSPI)          |
 | 21   | I2C_SDA               | I/O       | LCD + ADS1115                       |
 | 22   | I2C_SCL               | Output    | LCD + ADS1115                       |
-| 23   | MAX31865_MOSI         | Output    | RTD SPI data out                    |
+| 23   | VSPI_MOSI             | Output    | Shared SPI data out (MAX31865 + SD) |
 | 25   | EZO_EC_TX             | Output    | Atlas EZO-EC UART TX                |
 | 26   | STEPPER2_DIR          | Output    | NaOH pump direction                 |
 | 27   | STEPPER2_STEP         | Output    | NaOH pump step                      |

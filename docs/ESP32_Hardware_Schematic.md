@@ -26,7 +26,8 @@
  │   MOTORS           & ADC             & LED          CONTROL               │
  │   ───────          ──────            ─────          ────────       ──      │
  │   3x A4988         EZO-EC (UART)     I2C Bus        SPDT Relay    LCD     │
- │   + Nema17         MAX31865 (SPI)    WS2812 LED     + MOSFET      Encoder │
+ │   + Nema17         MAX31865 (VSPI)   WS2812 LED     + MOSFET      Encoder │
+ │                    SD Card (VSPI)                                         │
  │                    ADS1115 (I2C)                                          │
  │                    Water Meter                                            │
  │                    FW Pump Monitor                                        │
@@ -45,7 +46,7 @@
               3V3 ────────┤ 3V3      VIN ├──────── 5V
               GND ────────┤ GND      GND ├──────── GND
                           │              │
-  Enc Btn (sel) ← GPIO0  ┤ D0       D23 ├ GPIO23 → MAX31865 MOSI
+  Enc Btn (sel) ← GPIO0  ┤ D0       D23 ├ GPIO23 → VSPI MOSI (MAX31865 + SD)
    Encoder B/DT ← GPIO2  ┤ D2       D22 ├ GPIO22 → I2C SCL (LCD + ADS1115)
   Blowdown Relay → GPIO4 ┤ D4       D1  ├ TX0      (USB Serial - reserved)
    WS2812 Data  → GPIO5  ┤ D5       D3  ├ RX0      (USB Serial - reserved)
@@ -55,8 +56,8 @@
                           │  DO NOT USE  │
                           │              │
   Stepper1 STEP → GPIO12 ┤ D12*     D21 ├ GPIO21 → I2C SDA (LCD + ADS1115)
-  Stepper EN    → GPIO13 ┤ D13      D19 ├ GPIO19    (free)
-  Stepper1 DIR  → GPIO14 ┤ D14      D18 ├ GPIO18 → MAX31865 SCK
+  Stepper EN    → GPIO13 ┤ D13      D19 ├ GPIO19 → SD Card CS
+  Stepper1 DIR  → GPIO14 ┤ D14      D18 ├ GPIO18 → VSPI SCK (MAX31865 + SD)
   Encoder A/CLK ← GPIO15 ┤ D15      D5  │         (see above)
   MAX31865 CS   → GPIO16 ┤ D16      D17 ├ GPIO17 ← AUX Input (Drum Level)
 
@@ -92,13 +93,13 @@
 | **13** | Stepper Common ENABLE | OUT | A4988 #1/#2/#3 EN | — | Active LOW. Shared by all 3 drivers. |
 | **14** | Stepper 1 DIR (H2SO3) | OUT | A4988 #1 DIR | — | |
 | **15** | Encoder Output A (CLK) | IN | KY-040 CLK | — | Strapping pin. Pull-up keeps HIGH at boot (OK). |
-| **16** | MAX31865 Chip Select | OUT | Adafruit MAX31865 | Soft SPI | Active LOW. |
+| **16** | MAX31865 Chip Select | OUT | Adafruit MAX31865 | VSPI | Active LOW. |
 | **17** | AUX Input 1 (Drum Level) | IN | Dry contact switch | — | Internal pull-up enabled. |
-| **18** | MAX31865 SCK | OUT | Adafruit MAX31865 | Soft SPI | Clock for PT1000 RTD. |
-| **19** | *(free)* | — | — | — | Available for future expansion. |
+| **18** | VSPI SCK | OUT | MAX31865 + SD card | VSPI | Shared SPI clock. |
+| **19** | SD Card CS | OUT | Micro-SD module | VSPI | Chip select for SD card. |
 | **21** | I2C SDA | I/O | LCD (0x27) + ADS1115 (0x48) | I2C | 4.7k pull-up to 3.3V. 400 kHz Fast Mode. |
 | **22** | I2C SCL | OUT | LCD (0x27) + ADS1115 (0x48) | I2C | 4.7k pull-up to 3.3V. |
-| **23** | MAX31865 MOSI | OUT | Adafruit MAX31865 | Soft SPI | Data out to RTD board. |
+| **23** | VSPI MOSI | OUT | MAX31865 + SD card | VSPI | Shared SPI data out. |
 | **25** | EZO-EC UART TX | OUT | Atlas EZO-EC RX | UART2 | 9600 baud. ESP32 TX → EZO RX. |
 | **26** | Stepper 2 DIR (NaOH) | OUT | A4988 #2 DIR | — | |
 | **27** | Stepper 2 STEP (NaOH) | OUT | A4988 #2 STEP | — | |
@@ -107,7 +108,11 @@
 | **34** | Water Meter Pulse | IN | Contact closure (1 pulse/gal) | — | Input-only. External 10k pull-up to 3.3V required. Interrupt-driven. |
 | **35** | Feedwater Pump Monitor | IN | PC817 optocoupler output | — | Input-only. External 10k pull-up to 3.3V. Active LOW (pump ON). |
 | **36** | EZO-EC UART RX | IN | Atlas EZO-EC TX | UART2 | Input-only. ESP32 RX ← EZO TX. |
-| **39** | MAX31865 MISO | IN | Adafruit MAX31865 | Soft SPI | Input-only. Data in from RTD board. |
+| **39** | MAX31865 MISO / SD MISO | IN | Adafruit MAX31865 + SD card | VSPI | Input-only. Shared VSPI MISO. |
+
+> **Note:** GPIO19 was previously unassigned. It now serves as the SD card chip select
+> on the shared VSPI bus (MOSI=23, MISO=39, SCK=18). GPIO23 and GPIO18 are shared
+> between the MAX31865 and SD card; a FreeRTOS mutex protects concurrent access.
 
 ### Unused / Reserved GPIOs
 
@@ -557,6 +562,47 @@ select (short press) and menu enter/exit (long press).
 
 ---
 
+### 11. SD Card Module (Shared VSPI Bus)
+
+The micro-SD card module shares the hardware VSPI bus with the MAX31865.
+A FreeRTOS mutex (`spiMutex`) ensures only one device uses the bus at a time.
+
+```
+                         Shared VSPI Bus
+                    ┌─────────────────────────────┐
+                    │  MOSI = GPIO23               │
+                    │  MISO = GPIO39 (input-only)  │
+                    │  SCK  = GPIO18               │
+                    └──┬──────────────────────┬────┘
+                       │                      │
+              ┌────────┴────────┐    ┌────────┴────────┐
+              │  MAX31865 RTD   │    │  Micro-SD Card  │
+              │  CS = GPIO16    │    │  CS = GPIO19    │
+              └─────────────────┘    └─────────────────┘
+
+    Micro-SD Module Wiring:
+    ─────────────────────────────────────────────────
+    ESP32 GPIO19  ───→  CS   (chip select)
+    ESP32 GPIO23  ───→  MOSI (data in)
+    ESP32 GPIO39  ←───  MISO (data out)     (via module level shifter)
+    ESP32 GPIO18  ───→  SCK  (clock)
+    3.3V          ───→  VCC
+    GND           ───→  GND
+
+    ┌──────────────────────────────────────────────────────┐
+    │ SPI Clock:     4 MHz (SD_SPI_FREQ)                   │
+    │ Card Format:   FAT32, up to 32 GB                    │
+    │ Bus Sharing:   Mutex-protected with MAX31865          │
+    │ Log Format:    CSV files in /logs/YYYY-MM-DD.csv      │
+    │ Flush:         Every 30 seconds                       │
+    │ NOTE: Most micro-SD modules include onboard 3.3V     │
+    │       regulator and level shifters. Verify the module │
+    │       accepts 3.3V logic on MISO/MOSI/SCK/CS.        │
+    └──────────────────────────────────────────────────────┘
+```
+
+---
+
 ## Power Supply Architecture
 
 ```
@@ -654,6 +700,13 @@ select (short press) and menu enter/exit (long press).
 | 1 | R_gate | 1 kohm | MOSFET gate pull-down |
 | 1 | R_sense | 150 ohm, 1%, 0.25W metal film | 4-20mA feedback to voltage |
 | 1 | C_filt | 0.1 uF ceramic | ADC input noise filter |
+
+### SD Card (Local Data Logger)
+
+| Qty | Component | Part Number / Description | Notes |
+|-----|-----------|---------------------------|-------|
+| 1 | Micro-SD Card Module | SPI breakout (e.g., Adafruit 254) | 3.3V logic, VSPI bus |
+| 1 | Micro-SD Card | FAT32 formatted, 4–32 GB | Class 10 or better recommended |
 
 ### User Interface
 
