@@ -388,15 +388,21 @@ Three peristaltic/dosing pumps driven by Nema17 steppers through A4988 driver bo
 ### 6. WS2812 RGB LED Status Strip
 
 ```
-    ESP32 GPIO5 ───→ [Level Shifter 3.3V→5V] ───→ DIN ┌────────────────────────┐
-                      (74HCT125 or SN74AHCT125N)       │  WS2812B LED Strip     │
-                                                        │  8 Addressable LEDs    │
-                     5V ────────────────────────────────┤← VCC                   │
-                    GND ────────────────────────────────┤← GND                   │
-                                                        └────────────────────────┘
+    ESP32 GPIO5 ──→ [330 Ω series resistor] ──→ DIN ┌────────────────────────┐
+                                                    │  WS2812B LED Strip     │
+                                                    │  8 Addressable LEDs    │
+                     5V ────────────────────────────┤← VCC                   │
+                    GND ────────────────────────────┤← GND                   │
+                                                    └────────────────────────┘
 
     100-470 uF electrolytic cap across VCC-GND near first LED.
-    300-500 Ω resistor in series on data line (near GPIO5 output).
+    330 Ω resistor in series on data line (near GPIO5 output).
+
+    NOTE: The WS2812 datasheet requires VIH >= 0.7 × VDD (3.5V at 5V),
+    but ESP32 outputs 3.3V. In practice this works reliably — most
+    WS2812 chips accept 3.3V, and the first LED re-outputs at 5V
+    levels for the rest of the chain. A 74HCT125 level shifter can
+    be added if you experience flickering, but is usually not needed.
 
     LED Index Assignments:
     ┌─────┬──────────────────┬─────────────────────────────────────┐
@@ -637,7 +643,7 @@ Three peristaltic/dosing pumps driven by Nema17 steppers through A4988 driver bo
 | 1 | 20x4 LCD Display | HD44780 + PCF8574 I2C backpack | I2C address 0x27 (or 0x3F) |
 | 1 | KY-040 Rotary Encoder | With push button | Primary navigation input |
 | 1 | WS2812B LED Strip | 8 LEDs, addressable RGB | Status indicators |
-| 1 | Level Shifter (optional) | 74HCT125 or similar | 3.3V→5V for WS2812 data line |
+| 1 | Level Shifter (optional) | 74HCT125 or similar | 3.3V→5V for WS2812 data line. Usually not needed — see note in schematic. |
 
 ### Inputs
 
