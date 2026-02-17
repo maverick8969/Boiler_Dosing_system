@@ -10,7 +10,8 @@
  * - Water Meter Input (1 pulse per gallon)
  * - 20x4 LCD Display (I2C)
  * - WS2812 RGB LED Strip for Status Indicators
- * - Sensorex CS675HTTC-P1K/K=1.0 Conductivity Sensor (Analog + Pt1000 RTD)
+ * - Sensorex CS675HTTC/P1K Conductivity Probe via Atlas Scientific EZO-EC (UART)
+ * - PT1000 RTD Temperature Sensor via Adafruit MAX31865 (SPI)
  * - Automated Blowdown Valve (Relay Output)
  *
  * Based on CNC Shield V4.0 architecture adapted for ESP32
@@ -63,30 +64,33 @@
 #define WATER_METER_PULSES_PER_GAL  1         // Pulses per gallon (configurable)
 
 // ============================================================================
-// CONDUCTIVITY SENSOR INTERFACE (Sensorex CS675HTTC-P1K/K=1.0)
+// CONDUCTIVITY SENSOR INTERFACE (Sensorex CS675HTTC/P1K via Atlas Scientific EZO-EC)
 // ============================================================================
-// Analog interface with Pt1000 RTD temperature compensation
+// Atlas Scientific EZO-EC in UART mode for conductivity measurement
+// Adafruit MAX31865 via SPI for PT1000 RTD temperature compensation
 // Cell Constant K=1.0 for 0-10,000 uS/cm range
 
-// AC Excitation Signal Generation (via DAC or PWM)
-#define COND_EXCITE_PIN         GPIO_NUM_25   // DAC1 - AC excitation output
-#define COND_EXCITE_FREQ_HZ     1000          // 1kHz excitation frequency
+// Atlas Scientific EZO-EC UART (Serial2)
+#define EZO_EC_TX_PIN           GPIO_NUM_25   // ESP32 TX → EZO RX (was DAC1 excite)
+#define EZO_EC_RX_PIN           GPIO_NUM_36   // ESP32 RX ← EZO TX (was ADC cond sense)
+#define EZO_EC_BAUD_RATE        9600          // EZO default baud rate
+#define EZO_EC_UART_NUM         2             // Use UART2 (Serial2)
 
-// Conductivity Measurement (ADC input from current-to-voltage converter)
-#define COND_SENSE_PIN          GPIO_NUM_36   // ADC1_CH0 (SVP) - conductivity signal
-#define COND_ADC_CHANNEL        ADC1_CHANNEL_0
-#define COND_ADC_ATTEN          ADC_ATTEN_DB_11  // Full scale 0-3.3V
+// Adafruit MAX31865 PT1000 RTD (Software SPI)
+#define MAX31865_CS_PIN         GPIO_NUM_16   // Chip Select (was BLOWDOWN_NO dual relay)
+#define MAX31865_MOSI_PIN       GPIO_NUM_23   // Master Out Slave In (SPI MOSI)
+#define MAX31865_MISO_PIN       GPIO_NUM_39   // Master In Slave Out (was ADC temp sense)
+#define MAX31865_SCK_PIN        GPIO_NUM_18   // SPI Clock (was AUX_INPUT2)
 
-// Temperature Measurement (Pt1000 RTD via voltage divider)
-#define TEMP_SENSE_PIN          GPIO_NUM_39   // ADC1_CH3 (SVN) - temperature signal
-#define TEMP_ADC_CHANNEL        ADC1_CHANNEL_3
-#define TEMP_REF_RESISTOR       1000.0        // Reference resistor for Pt1000 (ohms)
+// PT1000 RTD Configuration
+#define RTD_NOMINAL_RESISTANCE  1000.0        // PT1000 nominal resistance at 0°C
+#define RTD_REFERENCE_RESISTOR  4300.0        // MAX31865 reference resistor for PT1000
+#define RTD_NUM_WIRES           2             // 2-wire RTD configuration (2, 3, or 4)
 
 // Conductivity Sensor Configuration
 #define COND_CELL_CONSTANT      1.0           // K=1.0 cm^-1
 #define COND_RANGE_MIN          0             // Minimum range (uS/cm)
 #define COND_RANGE_MAX          10000         // Maximum range (uS/cm)
-#define COND_TEMP_COEFF         0.02          // 2% per degree C (typical for water)
 
 // ============================================================================
 // BLOWDOWN VALVE CONTROL
@@ -95,7 +99,7 @@
 
 #define BLOWDOWN_RELAY_PIN      GPIO_NUM_4    // Relay driver output
 #define BLOWDOWN_NC_PIN         GPIO_NUM_4    // Normally Closed contact
-#define BLOWDOWN_NO_PIN         GPIO_NUM_16   // Normally Open contact (if using dual relay)
+// Note: GPIO16 repurposed for MAX31865 CS. Dual relay output no longer available.
 
 // Ball Valve Timing (for motorized actuators)
 #define BALL_VALVE_DELAY_DEFAULT    8         // Default delay in seconds (Worcester style)
@@ -147,7 +151,7 @@
 // For drum level switches or other safety interlocks
 
 #define AUX_INPUT1_PIN          GPIO_NUM_17   // Drum Level Switch 1
-#define AUX_INPUT2_PIN          GPIO_NUM_18   // Drum Level Switch 2
+// Note: GPIO18 repurposed for MAX31865 SCK. Drum level switch 2 no longer available.
 
 // ============================================================================
 // KEYPAD INTERFACE (4x4 Matrix)
@@ -213,15 +217,15 @@
 #define USE_EXTERNAL_ADC        false         // Set true if using ADS1115
 
 // ============================================================================
-// SPI BUS (For optional SD Card)
+// SPI BUS (MAX31865 uses software SPI, hardware SPI available for expansion)
 // ============================================================================
+// MAX31865 PT1000 RTD uses software SPI on dedicated pins (see conductivity section)
+// Hardware SPI pins remain available for future expansion (SD card, etc.)
 
-#define SPI_MOSI_PIN            GPIO_NUM_23
-#define SPI_MISO_PIN            GPIO_NUM_19   // Conflicts with keypad - choose one
-#define SPI_SCK_PIN             GPIO_NUM_18   // Conflicts with keypad - choose one
+#define SPI_MOSI_PIN            GPIO_NUM_23   // Shared with MAX31865 MOSI
+#define SPI_MISO_PIN            GPIO_NUM_19   // Available for expansion
+#define SPI_SCK_PIN             GPIO_NUM_18   // Shared with MAX31865 SCK
 #define SD_CS_PIN               GPIO_NUM_5    // Conflicts with WS2812 - choose one
-
-// Note: If using SD card, move WS2812 to GPIO_NUM_4 and remap blowdown
 
 // ============================================================================
 // PIN VALIDATION
@@ -250,21 +254,22 @@
 | 13   | STEPPER_ENABLE        | Output    | Common enable (active LOW)|
 | 14   | STEPPER1_DIR          | Output    | H2SO3 pump direction     |
 | 15   | ENCODER_PIN_A (CLK)   | Input     | Encoder output A         |
-| 16   | BLOWDOWN_NO           | Output    | Optional dual relay      |
+| 16   | MAX31865_CS           | Output    | RTD SPI chip select      |
 | 17   | AUX_INPUT1            | Input     | Drum level 1             |
-| 18   | AUX_INPUT2            | Input     | Drum level 2             |
+| 18   | MAX31865_SCK          | Output    | RTD SPI clock            |
 | 19   | BTN_MENU (optional)   | Input     | Extra button             |
 | 21   | I2C_SDA               | I/O       | LCD, sensors             |
 | 22   | I2C_SCL               | Output    | LCD, sensors             |
-| 25   | COND_EXCITE (DAC1)    | Output    | Conductivity excitation  |
+| 23   | MAX31865_MOSI         | Output    | RTD SPI data out         |
+| 25   | EZO_EC_TX             | Output    | Atlas EZO-EC UART TX     |
 | 26   | STEPPER2_DIR          | Output    | NaOH pump direction      |
 | 27   | STEPPER2_STEP         | Output    | NaOH pump step           |
 | 32   | STEPPER3_DIR          | Output    | Amine pump direction     |
 | 33   | STEPPER3_STEP         | Output    | Amine pump step          |
 | 34   | WATER_METER           | Input     | Water meter pulses       |
 | 35   | FLOW_SWITCH           | Input     | Flow switch              |
-| 36   | COND_SENSE (ADC)      | Input     | Conductivity measurement |
-| 39   | TEMP_SENSE (ADC)      | Input     | Temperature measurement  |
+| 36   | EZO_EC_RX             | Input     | Atlas EZO-EC UART RX     |
+| 39   | MAX31865_MISO         | Input     | RTD SPI data in          |
 */
 
 #endif // PIN_DEFINITIONS_H

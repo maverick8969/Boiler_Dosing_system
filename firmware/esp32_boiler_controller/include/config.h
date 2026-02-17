@@ -124,13 +124,19 @@ typedef enum {
 typedef struct {
     // Measurement settings
     uint16_t range_max;             // Maximum range in uS/cm (default 10000)
-    float cell_constant;            // K factor (default 1.0)
-    float ppm_conversion_factor;    // PPM = uS/cm * factor (0.2-1.0, default 0.666)
-    int8_t calibration_percent;     // Calibration offset -50 to +50%
+    float cell_constant;            // K factor (default 1.0) - sent to EZO via K command
+    float ppm_conversion_factor;    // TDS conversion factor (0.01-1.00, default 0.54) - sent to EZO via TDS command
+    int8_t calibration_percent;     // Software calibration trim -50 to +50% (applied after EZO reading)
     uint8_t units;                  // 0 = uS/cm, 1 = ppm
-    bool temp_comp_enabled;         // Temperature compensation enabled
-    float temp_comp_coefficient;    // Temperature coefficient (default 0.02 = 2%/C)
-    float manual_temperature;       // Manual temp value if auto disabled (C)
+    bool temp_comp_enabled;         // Temperature compensation enabled (sends temp to EZO via RT command)
+    float temp_comp_coefficient;    // Temperature coefficient (reserved, EZO handles compensation internally)
+    float manual_temperature;       // Manual temp value if RTD fails (C)
+
+    // Atlas Scientific EZO-EC output selection
+    bool ezo_output_ec;             // Enable EC (conductivity) in EZO output (default true)
+    bool ezo_output_tds;            // Enable TDS in EZO output (default true)
+    bool ezo_output_sal;            // Enable salinity in EZO output (default false)
+    bool ezo_output_sg;             // Enable specific gravity in EZO output (default false)
 
     // Sampling configuration
     sample_mode_t sample_mode;      // Sampling mode (C/I/T/P)
@@ -144,14 +150,19 @@ typedef struct {
     // Anti-flashing feature (for boiler steam flash)
     bool anti_flash_enabled;        // Enable signal dampening
     uint8_t anti_flash_factor;      // Dampening factor (1-10)
+
+    // MAX31865 PT1000 RTD configuration
+    float rtd_nominal;              // RTD nominal resistance at 0°C (1000.0 for PT1000)
+    float rtd_reference;            // Reference resistor value on MAX31865 board (4300.0 for PT1000)
+    uint8_t rtd_wires;              // Number of RTD wires (2, 3, or 4)
 } conductivity_config_t;
 
 // Default conductivity configuration
 #define COND_DEFAULT_RANGE_MAX          10000
 #define COND_DEFAULT_CELL_CONSTANT      1.0
-#define COND_DEFAULT_PPM_FACTOR         0.666
+#define COND_DEFAULT_PPM_FACTOR         0.54    // Atlas Scientific default TDS factor
 #define COND_DEFAULT_CAL_PERCENT        0
-#define COND_DEFAULT_UNITS              0   // uS/cm
+#define COND_DEFAULT_UNITS              0       // uS/cm
 #define COND_DEFAULT_TEMP_COMP          true
 #define COND_DEFAULT_TEMP_COEFF         0.02
 #define COND_DEFAULT_SAMPLE_MODE        SAMPLE_MODE_CONTINUOUS
@@ -161,6 +172,17 @@ typedef struct {
 #define COND_DEFAULT_BLOW_TIME          600     // 10 minutes
 #define COND_DEFAULT_PROP_BAND          200     // 200 uS/cm
 #define COND_DEFAULT_MAX_PROP_TIME      600     // 10 minutes
+
+// Atlas Scientific EZO-EC output defaults
+#define COND_DEFAULT_EZO_OUTPUT_EC      true
+#define COND_DEFAULT_EZO_OUTPUT_TDS     true
+#define COND_DEFAULT_EZO_OUTPUT_SAL     false
+#define COND_DEFAULT_EZO_OUTPUT_SG      false
+
+// MAX31865 PT1000 RTD defaults
+#define COND_DEFAULT_RTD_NOMINAL        1000.0  // PT1000
+#define COND_DEFAULT_RTD_REFERENCE      4300.0  // Reference resistor for PT1000
+#define COND_DEFAULT_RTD_WIRES          2       // 2-wire RTD
 
 // ============================================================================
 // BLOWDOWN CONFIGURATION STRUCTURE
@@ -507,7 +529,7 @@ typedef struct {
 
 #define TASK_STACK_SAFETY           2048
 #define TASK_STACK_CONTROL          4096
-#define TASK_STACK_MEASUREMENT      4096
+#define TASK_STACK_MEASUREMENT      6144
 #define TASK_STACK_DISPLAY          4096
 #define TASK_STACK_LOGGING          8192
 
