@@ -93,9 +93,9 @@ public:
     /**
      * @brief Main control update - call frequently
      * @param conductivity Current conductivity reading
-     * @param flow_ok True if flow switch indicates flow present
+     * @param flow_ok Always true (flow switch removed; kept for interface stability)
      */
-    void update(float conductivity, bool flow_ok);
+    void update(float conductivity, bool flow_ok = true);
 
     /**
      * @brief Set HOA mode

@@ -68,7 +68,7 @@ PinInfo inputPins[] = {
     {ENCODER_PIN_B,       "ENCODER_B (DT)",  "IN"},
     {ENCODER_BUTTON_PIN,  "ENCODER_BTN",     "IN"},
     {WATER_METER_PIN,     "WATER_METER",     "IN"},
-    {FLOW_SWITCH_PIN,     "FLOW_SWITCH",     "IN"},
+    {FEEDWATER_PUMP_PIN,  "FW_PUMP_MON",     "IN"},
     {AUX_INPUT1_PIN,      "AUX_INPUT1",      "IN"},
     {EZO_EC_RX_PIN,       "EZO_EC_RX",       "IN"},
     {MAX31865_MISO_PIN,   "MAX31865_MISO",   "IN"},

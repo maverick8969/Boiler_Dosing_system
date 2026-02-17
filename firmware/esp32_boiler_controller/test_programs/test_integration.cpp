@@ -92,7 +92,7 @@ void setup() {
     pinMode(BLOWDOWN_RELAY_PIN, OUTPUT);
     digitalWrite(BLOWDOWN_RELAY_PIN, LOW);
 
-    pinMode(FLOW_SWITCH_PIN, INPUT_PULLUP);
+    pinMode(FEEDWATER_PUMP_PIN, INPUT);  // Input-only GPIO, external pull-up
     pinMode(ENCODER_BUTTON_PIN, INPUT_PULLUP);
 
     pinMode(WATER_METER_PIN, INPUT);  // Input-only GPIO, no internal pull-up
@@ -230,10 +230,10 @@ void testAnalogInputs() {
 void testDigitalInputs() {
     Serial.println("\n--- Digital Input Test ---");
 
-    int flowSwitch = digitalRead(FLOW_SWITCH_PIN);
+    int fwPump = digitalRead(FEEDWATER_PUMP_PIN);
     int encBtn = digitalRead(ENCODER_BUTTON_PIN);
 
-    Serial.printf("  Flow switch:    %s\n", flowSwitch ? "OPEN" : "CLOSED");
+    Serial.printf("  FW pump monitor: %s\n", fwPump == FEEDWATER_PUMP_ACTIVE ? "PUMP ON" : "PUMP OFF");
     Serial.printf("  Encoder button: %s\n", encBtn ? "NOT PRESSED" : "PRESSED");
 
     // Inputs should be HIGH with pull-up when not active

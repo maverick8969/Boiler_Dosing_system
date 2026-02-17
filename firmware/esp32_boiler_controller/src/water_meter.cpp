@@ -212,7 +212,7 @@ float WaterMeter::pulsesToVolume(uint32_t pulses) {
 WaterMeterManager::WaterMeterManager() {
     _meters[0] = new WaterMeter(WATER_METER_PIN, 0);
     // Second meter on different pin if available
-    _meters[1] = new WaterMeter(GPIO_NUM_35, 1);  // Using flow switch pin for now
+    _meters[1] = new WaterMeter(GPIO_NUM_19, 1);  // GPIO19 free; WM2 disabled by default
 }
 
 bool WaterMeterManager::begin() {

@@ -311,7 +311,6 @@ typedef struct {
     bool feed_timeout_enabled;
 
     // Safety alarms
-    bool no_flow_enabled;
     bool sensor_error_enabled;
     bool temp_error_enabled;
     bool drum_level_enabled;
@@ -484,6 +483,14 @@ typedef struct {
     uint32_t hold_timer;
     uint32_t cycle_position;
 
+    // Feedwater pump monitoring (GPIO35 via optocoupler)
+    bool feedwater_pump_on;             // Current state
+    uint32_t fw_pump_cycle_count;       // Total activation cycles
+    uint32_t fw_pump_on_time_sec;       // Cumulative on-time (seconds)
+    uint32_t fw_pump_current_cycle_ms;  // Current cycle duration (ms)
+    uint32_t fw_pump_last_cycle_sec;    // Duration of last completed cycle (seconds)
+    uint32_t fw_pump_last_on_time;      // millis() when pump last turned on
+
 } system_state_t_runtime;
 
 // ============================================================================
@@ -497,7 +504,7 @@ typedef struct {
 #define ALARM_FEED1_TIMEOUT         0x0008
 #define ALARM_FEED2_TIMEOUT         0x0010
 #define ALARM_FEED3_TIMEOUT         0x0020
-#define ALARM_NO_FLOW               0x0040
+// 0x0040 was ALARM_NO_FLOW (flow switch removed; GPIO35 repurposed for feedwater pump monitor)
 #define ALARM_SENSOR_ERROR          0x0080
 #define ALARM_TEMP_ERROR            0x0100
 #define ALARM_DRUM_LEVEL_1          0x0200
@@ -519,6 +526,8 @@ typedef struct {
 #define NVS_KEY_PUMP3_TOTAL         "pump3_tot"
 #define NVS_KEY_BLOW_TOTAL          "blow_total"
 #define NVS_KEY_LAST_CAL_DATE       "last_cal"
+#define NVS_KEY_FW_PUMP_CYCLES      "fw_cycles"   // Feedwater pump activation count
+#define NVS_KEY_FW_PUMP_ONTIME      "fw_ontime"   // Feedwater pump cumulative on-time (sec)
 
 // ============================================================================
 // FREERTOS TASK CONFIGURATION

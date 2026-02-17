@@ -157,12 +157,17 @@
 #define LED_BRIGHTNESS          128
 
 // ============================================================================
-// FLOW SWITCH INPUT
+// FEEDWATER PUMP MONITOR (110VAC → optocoupler → GPIO)
 // ============================================================================
-// Digital input for flow switch (disables outputs on no flow)
+// Monitors the CT-6 boiler feedwater pump contactor via PC817 optocoupler.
+// The pump-on indicator light (110VAC) drives the optocoupler's LED through
+// series resistors (2x 33kΩ ½W + 1N4007 reverse protection). The phototransistor
+// pulls GPIO35 LOW when the pump is running.
+// Tracks: cycle count, per-cycle duration, cumulative on-time.
 
-#define FLOW_SWITCH_PIN         GPIO_NUM_35   // Input only GPIO
-#define FLOW_SWITCH_ACTIVE      LOW           // Active when flow present
+#define FEEDWATER_PUMP_PIN      GPIO_NUM_35   // Input only GPIO (no internal pull-up)
+#define FEEDWATER_PUMP_ACTIVE   LOW           // Optocoupler pulls LOW when pump ON
+#define FEEDWATER_PUMP_DEBOUNCE_MS  200       // Debounce for contactor chatter
 
 // ============================================================================
 // AUXILIARY DIGITAL INPUTS
@@ -253,7 +258,7 @@
 | 32   | STEPPER3_DIR          | Output    | Amine pump direction                |
 | 33   | STEPPER3_STEP         | Output    | Amine pump step                     |
 | 34   | WATER_METER           | Input     | Water meter pulses (input-only)     |
-| 35   | FLOW_SWITCH           | Input     | Flow switch (input-only)            |
+| 35   | FEEDWATER_PUMP_MON    | Input     | Pump contactor via optocoupler      |
 | 36   | EZO_EC_RX             | Input     | Atlas EZO-EC UART RX (input-only)   |
 | 39   | MAX31865_MISO         | Input     | RTD SPI data in (input-only)        |
 | I2C  | ADS1115 CH0           | Input     | Blowdown valve 4-20mA feedback      |

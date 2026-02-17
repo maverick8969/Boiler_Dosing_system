@@ -120,11 +120,12 @@ Runs on whichever core is free (default Core 1). Calls `processInputs()` then yi
 Each 100 ms tick executes the following pipeline:
 
 ```
-┌─ Read flow switch (GPIO35) ──────────────────────────────────────┐
+┌─ updateFeedwaterPumpMonitor() ───────────────────────────────────┐
+│   └── GPIO35 edge detect → cycle count, on-time, event logging  │
 │                                                                   │
 ├─ Get conductivity from last Measurement reading ─────────────────┤
 │                                                                   │
-├─ blowdownController.update(conductivity, flow_ok) ───────────────┤
+├─ blowdownController.update(conductivity) ────────────────────────┤
 │   └── state machine: IDLE → VALVE_OPENING → BLOWING_DOWN →       │
 │       VALVE_CLOSING → IDLE  (see Blowdown State Machine below)   │
 │                                                                   │
@@ -380,6 +381,54 @@ Encoder rotation is handled by ISR on GPIO15 (CLK) and GPIO2 (DT).
 
 ---
 
+## Feedwater Pump Monitor (`updateFeedwaterPumpMonitor()` — `main.cpp`)
+
+Monitors the CT-6 boiler feedwater pump contactor via a PC817 optocoupler
+on GPIO35. Called at the top of each Control task tick (100 ms).
+
+### Data Tracked
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `feedwater_pump_on` | bool | Current pump state |
+| `fw_pump_cycle_count` | uint32 | Total pump activations (persisted to NVS) |
+| `fw_pump_on_time_sec` | uint32 | Cumulative on-time in seconds (persisted to NVS) |
+| `fw_pump_current_cycle_ms` | uint32 | Duration of current cycle while running |
+| `fw_pump_last_cycle_sec` | uint32 | Duration of last completed cycle |
+
+### Logic
+
+```
+Read GPIO35 (active LOW via optocoupler)
+       │
+       ├── Debounce (200 ms window for contactor chatter)
+       │
+       ├── Rising edge (pump turns ON):
+       │     → increment fw_pump_cycle_count
+       │     → record fw_pump_last_on_time = millis()
+       │     → log FW_PUMP_ON event with cycle number
+       │
+       ├── Falling edge (pump turns OFF):
+       │     → calculate cycle_sec = (millis - last_on_time) / 1000
+       │     → accumulate fw_pump_on_time_sec += cycle_sec
+       │     → store fw_pump_last_cycle_sec = cycle_sec
+       │     → log FW_PUMP_OFF event with cycle duration
+       │
+       └── While pump ON:
+             → update fw_pump_current_cycle_ms continuously
+
+NVS persist: fw_cycles + fw_ontime saved every 5 minutes
+```
+
+### Logged Events
+
+| Event Type | Description | Value Field |
+|------------|-------------|-------------|
+| `FW_PUMP_ON` | Feedwater pump started | Cycle count |
+| `FW_PUMP_OFF` | Feedwater pump stopped | Cycle duration (seconds) |
+
+---
+
 ## Alarm Processing (`checkAlarms()` — `main.cpp:486`)
 
 Runs at the end of each Control task tick (100 ms).
@@ -392,7 +441,7 @@ Runs at the end of each Control task tick (100 ms).
 | `0x0002` | `ALARM_COND_LOW` | Conductivity < low threshold |
 | `0x0004` | `ALARM_BLOWDOWN_TIMEOUT` | `blowdownController.isTimeout()` |
 | `0x0008–0x0020` | `ALARM_FEED1/2/3_TIMEOUT` | Pump ran past `time_limit_seconds` |
-| `0x0040` | `ALARM_NO_FLOW` | Flow switch (GPIO35) not in active state |
+| `0x0040` | *(reserved)* | Was `ALARM_NO_FLOW`; GPIO35 repurposed for feedwater pump monitor |
 | `0x0080` | `ALARM_SENSOR_ERROR` | `conductivitySensor.isSensorOK()` returns false |
 | `0x0100` | `ALARM_TEMP_ERROR` | `conductivitySensor.isTempSensorOK()` returns false |
 | `0x0200` | `ALARM_DRUM_LEVEL_1` | AUX_INPUT1 (GPIO17) LOW |
@@ -445,6 +494,9 @@ if (millis() - lastLogTime >= log_interval_ms):
 | `blowdown_active` | `blowdownController.isActive()` |
 | `valve_position_mA` | `blowdownController.getFeedbackmA()` |
 | `pump1/2/3_active` | `pumpManager.getPump(n)->isRunning()` |
+| `feedwater_pump_on` | `systemState.feedwater_pump_on` |
+| `fw_pump_cycle_count` | `systemState.fw_pump_cycle_count` |
+| `fw_pump_on_time_sec` | `systemState.fw_pump_on_time_sec` |
 | `active_alarms` | `systemState.active_alarms` |
 
 ---
@@ -462,6 +514,8 @@ if (millis() - lastLogTime >= log_interval_ms):
 | `pump2_tot` | uint32 | Pump 2 cumulative runtime |
 | `pump3_tot` | uint32 | Pump 3 cumulative runtime |
 | `blow_total` | uint32 | Cumulative blowdown time (seconds) |
+| `fw_cycles` | uint32 | Feedwater pump activation count |
+| `fw_ontime` | uint32 | Feedwater pump cumulative on-time (seconds) |
 | `last_cal` | uint32 | Last calibration epoch timestamp |
 
 ### Save Triggers
@@ -471,7 +525,7 @@ if (millis() - lastLogTime >= log_interval_ms):
 | User exits edit mode (LCD or web) | `config` blob |
 | WiFi credentials change | `config` blob |
 | Calibration performed | `config` blob + `last_cal` |
-| Every 5 minutes | `wm*_total`, `pump*_tot`, `blow_total` |
+| Every 5 minutes | `wm*_total`, `pump*_tot`, `blow_total`, `fw_cycles`, `fw_ontime` |
 | Graceful shutdown | All keys |
 
 ### Validation on Load (`loadConfiguration()`)
@@ -587,7 +641,7 @@ Control Task    FuzzyController    PumpManager       ChemicalPump[i]    AccelSte
 | **Blowdown valve** | Feedback < 3 mA | `valve_fault = true` → `ALARM_VALVE_FAULT`; valve closed, state → `BD_STATE_ERROR` |
 | **Blowdown valve** | Feedback doesn't confirm position within ball_valve_delay × 2 | Timeout → `BD_STATE_TIMEOUT` |
 | **Pump** | Runtime exceeds `time_limit_seconds` | Pump stopped → `PUMP_STATE_LOCKED_OUT` → `ALARM_FEEDn_TIMEOUT` |
-| **Flow switch** | GPIO35 != `FLOW_SWITCH_ACTIVE` | `ALARM_NO_FLOW`; blowdown controller forces valve closed |
+| **FW Pump Monitor** | GPIO35 via optocoupler | Logs `FW_PUMP_ON`/`FW_PUMP_OFF` events; tracks cycle count + on-time in NVS |
 | **Drum level** | AUX_INPUT1 (GPIO17) LOW | `ALARM_DRUM_LEVEL_1` |
 | **WiFi** | Disconnect detected | `dataLogger` auto-reconnects; readings buffered (100 slots) |
 | **NVS** | Config load fails validation | Factory defaults loaded; `saveConfiguration()` called |

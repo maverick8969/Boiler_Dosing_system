@@ -67,6 +67,8 @@ void initializeDefaults();
 void checkAlarms();
 void processInputs();
 void logSensorData();
+void updateFeedwaterPumpMonitor();
+void saveFeedwaterPumpNVS();
 
 // FreeRTOS task functions
 void taskControlLoop(void* parameter);
@@ -151,8 +153,22 @@ void setup() {
         }
     }
 
-    // Initialize flow switch input
-    pinMode(FLOW_SWITCH_PIN, INPUT_PULLUP);
+    // Initialize feedwater pump monitor input (optocoupler output, external 10k pull-up)
+    pinMode(FEEDWATER_PUMP_PIN, INPUT);  // GPIO35: input-only, no internal pull-up
+    systemState.feedwater_pump_on = false;
+    systemState.fw_pump_cycle_count = 0;
+    systemState.fw_pump_on_time_sec = 0;
+    systemState.fw_pump_current_cycle_ms = 0;
+    systemState.fw_pump_last_cycle_sec = 0;
+    systemState.fw_pump_last_on_time = 0;
+
+    // Load feedwater pump totals from NVS
+    preferences.begin(NVS_NAMESPACE, true);
+    systemState.fw_pump_cycle_count = preferences.getUInt(NVS_KEY_FW_PUMP_CYCLES, 0);
+    systemState.fw_pump_on_time_sec = preferences.getUInt(NVS_KEY_FW_PUMP_ONTIME, 0);
+    preferences.end();
+    Serial.printf("Feedwater pump totals loaded: %u cycles, %u sec on-time\n",
+                  systemState.fw_pump_cycle_count, systemState.fw_pump_on_time_sec);
 
     // Initialize auxiliary inputs
     pinMode(AUX_INPUT1_PIN, INPUT_PULLUP);
@@ -234,14 +250,14 @@ void taskControlLoop(void* parameter) {
     TickType_t lastWakeTime = xTaskGetTickCount();
 
     while (true) {
-        // Check flow switch
-        bool flow_ok = (digitalRead(FLOW_SWITCH_PIN) == FLOW_SWITCH_ACTIVE);
+        // --- Feedwater pump monitoring (GPIO35 via optocoupler) ---
+        updateFeedwaterPumpMonitor();
 
         // Get current conductivity
         float conductivity = conductivitySensor.getLastReading().calibrated;
 
-        // Update blowdown control
-        blowdownController.update(conductivity, flow_ok);
+        // Update blowdown control (flow_ok always true — no flow switch installed)
+        blowdownController.update(conductivity);
 
         // Get water meter data for feed modes
         uint32_t water_contacts = waterMeterManager.getContactsSinceLast(2);  // Both meters
@@ -460,7 +476,6 @@ void initializeDefaults() {
     systemConfig.alarms.cond_low_absolute = 0;
     systemConfig.alarms.blowdown_timeout_enabled = true;
     systemConfig.alarms.feed_timeout_enabled = true;
-    systemConfig.alarms.no_flow_enabled = true;
     systemConfig.alarms.sensor_error_enabled = true;
 
     // Network defaults
@@ -513,11 +528,6 @@ void checkAlarms() {
         new_alarms |= ALARM_BLOWDOWN_TIMEOUT;
     }
 
-    // No flow
-    if (digitalRead(FLOW_SWITCH_PIN) != FLOW_SWITCH_ACTIVE) {
-        new_alarms |= ALARM_NO_FLOW;
-    }
-
     // Sensor errors
     if (!conductivitySensor.isSensorOK()) {
         new_alarms |= ALARM_SENSOR_ERROR;
@@ -551,10 +561,6 @@ void checkAlarms() {
     if (rising_alarms & ALARM_BLOWDOWN_TIMEOUT) {
         dataLogger.logAlarm(ALARM_BLOWDOWN_TIMEOUT, "BLOWDOWN TIMEOUT", true, 0);
         display.showAlarm("BLOWDOWN TIMEOUT");
-    }
-    if (rising_alarms & ALARM_NO_FLOW) {
-        dataLogger.logAlarm(ALARM_NO_FLOW, "NO FLOW", true, 0);
-        display.showAlarm("NO FLOW");
     }
     if (rising_alarms & ALARM_SENSOR_ERROR) {
         dataLogger.logAlarm(ALARM_SENSOR_ERROR, "SENSOR ERROR", true, 0);
@@ -650,7 +656,77 @@ void logSensorData() {
     reading.pump1_active = pumpManager.getPump(PUMP_H2SO3)->isRunning();
     reading.pump2_active = pumpManager.getPump(PUMP_NAOH)->isRunning();
     reading.pump3_active = pumpManager.getPump(PUMP_AMINE)->isRunning();
+    reading.feedwater_pump_on = systemState.feedwater_pump_on;
+    reading.fw_pump_cycle_count = systemState.fw_pump_cycle_count;
+    reading.fw_pump_on_time_sec = systemState.fw_pump_on_time_sec;
     reading.active_alarms = systemState.active_alarms;
 
     dataLogger.logReading(&reading);
+}
+
+// ============================================================================
+// FEEDWATER PUMP MONITOR (GPIO35 via PC817 optocoupler)
+// ============================================================================
+// Tracks CT-6 boiler feedwater pump activation cycles and on-time.
+// The 110VAC pump-on indicator light is isolated through an optocoupler
+// (PC817 + 2x33kΩ + 1N4007), producing a LOW on GPIO35 when pump runs.
+
+void updateFeedwaterPumpMonitor() {
+    static uint32_t last_edge_time = 0;
+    static bool prev_state = false;
+    static uint32_t nvs_save_timer = 0;
+
+    bool raw = (digitalRead(FEEDWATER_PUMP_PIN) == FEEDWATER_PUMP_ACTIVE);
+
+    // Debounce — ignore edges within FEEDWATER_PUMP_DEBOUNCE_MS of last edge
+    uint32_t now = millis();
+    if (raw != prev_state && (now - last_edge_time >= FEEDWATER_PUMP_DEBOUNCE_MS)) {
+        last_edge_time = now;
+
+        if (raw && !systemState.feedwater_pump_on) {
+            // --- Pump just turned ON ---
+            systemState.feedwater_pump_on = true;
+            systemState.fw_pump_last_on_time = now;
+            systemState.fw_pump_cycle_count++;
+
+            Serial.printf("[FW PUMP] ON  — cycle #%u\n", systemState.fw_pump_cycle_count);
+            dataLogger.logEvent("FW_PUMP_ON", "Feedwater pump started",
+                                systemState.fw_pump_cycle_count);
+        }
+        else if (!raw && systemState.feedwater_pump_on) {
+            // --- Pump just turned OFF ---
+            uint32_t cycle_ms = now - systemState.fw_pump_last_on_time;
+            uint32_t cycle_sec = cycle_ms / 1000;
+
+            systemState.feedwater_pump_on = false;
+            systemState.fw_pump_last_cycle_sec = cycle_sec;
+            systemState.fw_pump_on_time_sec += cycle_sec;
+            systemState.fw_pump_current_cycle_ms = 0;
+
+            Serial.printf("[FW PUMP] OFF — ran %u sec (total: %u sec, %u cycles)\n",
+                          cycle_sec, systemState.fw_pump_on_time_sec,
+                          systemState.fw_pump_cycle_count);
+            dataLogger.logEvent("FW_PUMP_OFF", "Feedwater pump stopped", cycle_sec);
+        }
+
+        prev_state = raw;
+    }
+
+    // Update running cycle duration while pump is on
+    if (systemState.feedwater_pump_on) {
+        systemState.fw_pump_current_cycle_ms = now - systemState.fw_pump_last_on_time;
+    }
+
+    // Persist totals to NVS every 5 minutes
+    if (now - nvs_save_timer >= 300000) {
+        nvs_save_timer = now;
+        saveFeedwaterPumpNVS();
+    }
+}
+
+void saveFeedwaterPumpNVS() {
+    preferences.begin(NVS_NAMESPACE, false);
+    preferences.putUInt(NVS_KEY_FW_PUMP_CYCLES, systemState.fw_pump_cycle_count);
+    preferences.putUInt(NVS_KEY_FW_PUMP_ONTIME, systemState.fw_pump_on_time_sec);
+    preferences.end();
 }

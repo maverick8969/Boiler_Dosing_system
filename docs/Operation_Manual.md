@@ -313,7 +313,7 @@ In AUTO mode the controller compares the measured conductivity against the setpo
 | **LOW CONDUCTIVITY** | TDS below low limit | Check probe, verify readings |
 | **BLOWDOWN TIMEOUT** | Blowdown exceeded time limit | Check valve, reduce blowdown |
 | **FEED TIMEOUT** | Pump ran too long | Check chemical supply, calibration |
-| **NO FLOW** | Flow switch not detecting flow | Check flow switch, boiler operation |
+| **VALVE FAULT** | Blowdown valve feedback < 3 mA | Check valve wiring, actuator |
 | **SENSOR ERROR** | Conductivity probe fault | Clean/replace probe |
 | **TEMP ERROR** | Temperature sensor fault | Check RTD connections |
 | **LOW CONFIDENCE** | Insufficient test data | Enter current test results |

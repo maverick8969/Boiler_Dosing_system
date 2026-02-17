@@ -46,6 +46,9 @@ typedef struct {
     bool pump1_active;
     bool pump2_active;
     bool pump3_active;
+    bool feedwater_pump_on;
+    uint32_t fw_pump_cycle_count;       // Cumulative feedwater pump cycles
+    uint32_t fw_pump_on_time_sec;       // Cumulative feedwater pump on-time (sec)
     uint16_t active_alarms;
 } sensor_reading_t;
 

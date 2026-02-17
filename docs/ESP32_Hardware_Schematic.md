@@ -29,7 +29,7 @@
  │   + Nema17         MAX31865 (SPI)    WS2812 LED     + MOSFET      Encoder │
  │                    ADS1115 (I2C)                                          │
  │                    Water Meter                                            │
- │                    Flow Switch                                            │
+ │                    FW Pump Monitor                                        │
  └────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -69,7 +69,7 @@
   Stepper3 STEP → GPIO33 ┤ D33      D15 │         (see above)
                           │              │
   Water Meter   ← GPIO34 ┤ D34      D13 │         (see above)
-  Flow Switch   ← GPIO35 ┤ D35      D12 │         (see above)
+  FW Pump Mon   ← GPIO35 ┤ D35      D12 │         (see above)
   EZO-EC RX     ← GPIO36 ┤ VP       D14 │         (see above)
   MAX31865 MISO ← GPIO39 ┤ VN       D27 │         (see above)
                           │              │
@@ -105,7 +105,7 @@
 | **32** | Stepper 3 DIR (Amine) | OUT | A4988 #3 DIR | — | |
 | **33** | Stepper 3 STEP (Amine) | OUT | A4988 #3 STEP | — | |
 | **34** | Water Meter Pulse | IN | Contact closure (1 pulse/gal) | — | Input-only. External 10k pull-up to 3.3V required. Interrupt-driven. |
-| **35** | Flow Switch | IN | SPDT flow switch | — | Input-only. External 10k pull-up to 3.3V. Active LOW. |
+| **35** | Feedwater Pump Monitor | IN | PC817 optocoupler output | — | Input-only. External 10k pull-up to 3.3V. Active LOW (pump ON). |
 | **36** | EZO-EC UART RX | IN | Atlas EZO-EC TX | UART2 | Input-only. ESP32 RX ← EZO TX. |
 | **39** | MAX31865 MISO | IN | Adafruit MAX31865 | Soft SPI | Input-only. Data in from RTD board. |
 
@@ -459,31 +459,36 @@ Three peristaltic/dosing pumps driven by Nema17 steppers through A4988 driver bo
 
 ---
 
-### 8. Flow Switch Input
+### 8. Feedwater Pump Monitor (110VAC via Optocoupler)
+
+Monitors the CT-6 boiler feedwater pump contactor. The pump-on indicator
+light (110VAC) drives a PC817 optocoupler through series resistors. The
+optocoupler's phototransistor pulls GPIO35 LOW when the pump is running.
 
 ```
-                                      3.3V
-                                       │
-                                    ┌──┴──┐
-                                    │ 10k │ External pull-up
-                                    └──┬──┘    (GPIO35 has no internal pull-up)
-                                       │
-    ESP32 GPIO35 (input only) ─────────┤
-                                       │
-                                  ┌────┴────┐
-                                  │  Flow   │
-                                  │ Switch  │  Closes when flow is present
-                                  │ (SPDT)  │
-                                  └────┬────┘
-                                       │
-                                      GND
+    110VAC Hot (pump-on light) ─────┐
+                                    │
+                                  R1 (33 kΩ, ½W)
+                                    │
+                                  R2 (33 kΩ, ½W)          3.3V
+                                    │                       │
+                              ┌─────┤                    ┌──┴──┐
+                         D1   │     │                    │ 10k │  External pull-up
+                       1N4007 │   ┌─┴──┐                └──┬──┘  (GPIO35 has no
+                     (reverse │   │LED │ PC817              │      internal pull-up)
+                    protection│   └─┬──┘                    │
+                              └─────┤        Collector ─────┤
+                                    │                       │
+    110VAC Neutral ─────────────────┘        Emitter ──── GND
+                                                            │
+                                    ESP32 GPIO35 ───────────┘
 
-    ┌──────────────────────────────────────────────────┐
-    │ Active State:  LOW when flow present             │
-    │ No Flow:       HIGH (pull-up, contact open)      │
-    │ Safety:        Disables blowdown and pumps       │
-    │                when flow is lost                  │
-    └──────────────────────────────────────────────────┘
+    ┌────────────────────────────────────────────────────────────────┐
+    │ Pump ON:  Optocoupler conducts → GPIO35 = LOW                 │
+    │ Pump OFF: Optocoupler open    → GPIO35 = HIGH (10k pull-up)   │
+    │ Tracks:   Cycle count, per-cycle duration, cumulative on-time │
+    │ Logs:     FW_PUMP_ON / FW_PUMP_OFF events to TimescaleDB      │
+    └────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -664,7 +669,9 @@ select (short press) and menu enter/exit (long press).
 | Qty | Component | Part Number / Description | Notes |
 |-----|-----------|---------------------------|-------|
 | 1 | Water Meter | Contact closure, 1 pulse/gal | Dry contact reed switch |
-| 1 | Flow Switch | SPDT, pipe-mount | Safety interlock |
+| 1 | PC817 Optocoupler | DIP-4 (or EL817, 4N25) | 110VAC isolation for feedwater pump monitor |
+| 2 | Resistor | 33 kΩ, ½W, metal film | Series current limit for optocoupler (110VAC side) |
+| 1 | 1N4007 Diode | 1000V, 1A | Reverse voltage protection for optocoupler LED |
 | 1 | Drum Level Switch (optional) | Float switch or probe | Auxiliary safety input |
 
 ### Passive Components

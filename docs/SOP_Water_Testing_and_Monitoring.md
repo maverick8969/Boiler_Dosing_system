@@ -340,7 +340,7 @@ After entering test data, observe the control recommendations:
 | **LOW CONDUCTIVITY** | Verify probe is working | Check for dilution source |
 | **BLOWDOWN TIMEOUT** | Check valve is closed | Reduce blowdown duration |
 | **FEED TIMEOUT** | Check chemical supply | Verify pump calibration |
-| **NO FLOW** | Check boiler operation | Inspect flow switch |
+| **VALVE FAULT** | Blowdown valve feedback fault | Check valve wiring, actuator |
 | **SENSOR ERROR** | Check probe connections | Clean or replace probe |
 | **TEMP ERROR** | Check RTD connections | Verify temperature manually |
 | **LOW CONFIDENCE** | Enter current test data | See Section 9 |

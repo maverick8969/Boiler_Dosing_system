@@ -181,7 +181,7 @@ For binary operation, the firmware only needs to distinguish three conditions:
 
 The 4-20mA feedback signal is converted to a voltage using a precision sense resistor, then read by the **ADS1115 external 16-bit ADC** on the shared I2C bus. A 150 Ω sense resistor converts 4-20mA to 0.6–3.0V.
 
-> **Why ADS1115?** All ESP32 ADC1 input-only pins (GPIO34–39) are already occupied (water meter, flow switch, EZO-EC RX, MAX31865 MISO). The ADS1115 provides 16-bit resolution with no additional GPIO — it shares the existing I2C bus (GPIO21 SDA / GPIO22 SCL) at address `0x48`.
+> **Why ADS1115?** All ESP32 ADC1 input-only pins (GPIO34–39) are already occupied (water meter, feedwater pump monitor, EZO-EC RX, MAX31865 MISO). The ADS1115 provides 16-bit resolution with no additional GPIO — it shares the existing I2C bus (GPIO21 SDA / GPIO22 SCL) at address `0x48`.
 
 ```
 4 mA × 150 Ω = 0.60V
@@ -298,7 +298,7 @@ This feedback is used to:
 1. **Dual fail-safe:** Both the relay circuit (de-energize → 4 mA → closed) and the actuator's EP420C fail mode (loss of signal → closed) ensure the valve defaults to closed on any fault.
 2. **Power loss:** The actuator holds its last position on power loss (no spring return). The relay also de-energizes, so on power restoration the control signal will be 4 mA (closed) and the actuator will drive to closed.
 3. **Timeout protection:** The firmware's existing `checkTimeout()` method prevents indefinite blowdown by closing the valve after the configurable time limit.
-4. **Flow switch interlock:** The `update()` method checks `flow_ok` and forces the valve closed if flow is lost.
+4. **Feedback-based fault detection:** The `readFeedback()` method detects wiring faults (< 3 mA) and stuck valves, triggering `ALARM_VALVE_FAULT`.
 5. **HOA override:** Hand/Off/Auto control allows manual intervention via the LCD menu or web UI.
 
 ---
