@@ -1,12 +1,10 @@
-'blowdown valve electrical design and documentation
-
-# Dry Contact Flow Meter Pulse Protection  
+# Dry Contact Flow Meter Pulse Protection
 ## ESP32 (GPIO20) – Low-Frequency Application
 
 ### Application Summary
 - **Sensor type:** Dry contact (reed / switch)
-- **Pulse rate:** 1 pulse per gallon  
-- **Flow volume:** ~125 gallons/day  
+- **Pulse rate:** 1 pulse per gallon
+- **Flow volume:** ~125 gallons/day
 - **Pulse frequency:** ~0.00145 Hz (extremely slow)
 - **MCU:** ESP32 (3.3 V logic)
 - **GPIO used:** GPIO20
@@ -139,6 +137,3 @@ No isolation, comparators, or level shifting required given:
 - **Long outdoor runs / mixed power conduit:** add TVS or optocoupler
 - **Higher pulse rates:** reduce C1 (e.g., 1–10 nF)
 - **Severe EMI:** add Schmitt trigger buffer (74LVC1G17)
-
----
-
