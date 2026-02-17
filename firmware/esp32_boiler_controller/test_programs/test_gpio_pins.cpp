@@ -3,11 +3,12 @@
  * @brief Test program for all GPIO pins and peripherals
  *
  * Tests:
- * - All digital outputs (relays, LEDs)
- * - All digital inputs (buttons, switches)
- * - All analog inputs (ADC)
- * - PWM outputs
+ * - All digital outputs (relay, stepper pins, LEDs)
+ * - All digital inputs (encoder, flow switch, water meter)
+ * - All analog inputs (ADC via ADS1115)
  * - I2C bus scan
+ *
+ * Uses the canonical pin_definitions.h — no hardcoded pin numbers.
  *
  * Usage:
  * - Upload to ESP32
@@ -17,6 +18,7 @@
 
 #include <Arduino.h>
 #include <Wire.h>
+#include "pin_definitions.h"
 
 // ============================================================================
 // FORWARD DECLARATIONS
@@ -27,103 +29,51 @@ void printPinMap();
 void processCommand(char cmd);
 void testAllOutputs();
 void testAllInputs();
-void testAllADC();
 void testRelays();
 void testStepperPins();
-void testButtons();
+void testEncoder();
 void continuousInputMonitor();
 void wiggleAllOutputs();
 void scanI2C();
 
 // ============================================================================
-// PIN DEFINITIONS - MATCH YOUR HARDWARE
-// ============================================================================
-
-// Stepper motor pins
-#define STEPPER_ENABLE_PIN  13
-#define STEPPER1_STEP_PIN   27
-#define STEPPER1_DIR_PIN    26
-#define STEPPER2_STEP_PIN   25
-#define STEPPER2_DIR_PIN    33
-#define STEPPER3_STEP_PIN   32
-#define STEPPER3_DIR_PIN    14
-
-// Relay outputs
-#define BLOWDOWN_RELAY_PIN  4   // SPDT relay for 4-20mA valve control
-#define ALARM_RELAY_PIN     2
-
-// Sensor inputs (ADC)
-#define COND_EXCITE_PIN     4
-#define COND_SENSE_PIN      34  // ADC1_CH6
-#define TEMP_SENSE_PIN      35  // ADC1_CH7
-
-// Water meter inputs
-#define WATER_METER1_PIN    36  // ADC1_CH0
-#define WATER_METER2_PIN    39  // ADC1_CH3
-
-// Flow switch
-#define FLOW_SWITCH_PIN     5
-
-// Auxiliary inputs
-#define AUX_INPUT1_PIN      16
-#define AUX_INPUT2_PIN      17
-
-// Button inputs
-#define BTN_UP_PIN          18
-#define BTN_DOWN_PIN        19
-#define BTN_ENTER_PIN       23
-#define BTN_MENU_PIN        0   // Boot button
-
-// I2C
-#define I2C_SDA_PIN         21
-#define I2C_SCL_PIN         22
-
-// WS2812 LED
-#define WS2812_PIN          12
-
-// ============================================================================
-// PIN ARRAYS FOR ITERATION
+// PIN ARRAYS FOR ITERATION (sourced from pin_definitions.h)
 // ============================================================================
 
 struct PinInfo {
     int pin;
     const char* name;
-    const char* type;  // "OUT", "IN", "ADC", "PWM"
+    const char* type;  // "OUT", "IN"
 };
 
 PinInfo outputPins[] = {
-    {STEPPER_ENABLE_PIN, "STEPPER_ENABLE", "OUT"},
-    {STEPPER1_STEP_PIN, "STEPPER1_STEP", "OUT"},
-    {STEPPER1_DIR_PIN, "STEPPER1_DIR", "OUT"},
-    {STEPPER2_STEP_PIN, "STEPPER2_STEP", "OUT"},
-    {STEPPER2_DIR_PIN, "STEPPER2_DIR", "OUT"},
-    {STEPPER3_STEP_PIN, "STEPPER3_STEP", "OUT"},
-    {STEPPER3_DIR_PIN, "STEPPER3_DIR", "OUT"},
-    {BLOWDOWN_RELAY_PIN, "BLOWDOWN_RELAY", "OUT"},
-    {ALARM_RELAY_PIN, "ALARM_RELAY", "OUT"},
-    {COND_EXCITE_PIN, "COND_EXCITE", "OUT"},
-    {WS2812_PIN, "WS2812_LED", "OUT"},
+    {STEPPER_ENABLE_PIN,  "STEPPER_ENABLE",  "OUT"},
+    {STEPPER1_STEP_PIN,   "STEPPER1_STEP",   "OUT"},
+    {STEPPER1_DIR_PIN,    "STEPPER1_DIR",    "OUT"},
+    {STEPPER2_STEP_PIN,   "STEPPER2_STEP",   "OUT"},
+    {STEPPER2_DIR_PIN,    "STEPPER2_DIR",    "OUT"},
+    {STEPPER3_STEP_PIN,   "STEPPER3_STEP",   "OUT"},
+    {STEPPER3_DIR_PIN,    "STEPPER3_DIR",    "OUT"},
+    {BLOWDOWN_RELAY_PIN,  "BLOWDOWN_RELAY",  "OUT"},
+    {WS2812_DATA_PIN,     "WS2812_DATA",     "OUT"},
+    {MAX31865_CS_PIN,     "MAX31865_CS",     "OUT"},
+    {MAX31865_MOSI_PIN,   "MAX31865_MOSI",   "OUT"},
+    {MAX31865_SCK_PIN,    "MAX31865_SCK",    "OUT"},
+    {EZO_EC_TX_PIN,       "EZO_EC_TX",       "OUT"},
 };
 const int numOutputs = sizeof(outputPins) / sizeof(outputPins[0]);
 
 PinInfo inputPins[] = {
-    {FLOW_SWITCH_PIN, "FLOW_SWITCH", "IN"},
-    {AUX_INPUT1_PIN, "AUX_INPUT1", "IN"},
-    {AUX_INPUT2_PIN, "AUX_INPUT2", "IN"},
-    {BTN_UP_PIN, "BTN_UP", "IN"},
-    {BTN_DOWN_PIN, "BTN_DOWN", "IN"},
-    {BTN_ENTER_PIN, "BTN_ENTER", "IN"},
-    {BTN_MENU_PIN, "BTN_MENU", "IN"},
+    {ENCODER_PIN_A,       "ENCODER_A (CLK)", "IN"},
+    {ENCODER_PIN_B,       "ENCODER_B (DT)",  "IN"},
+    {ENCODER_BUTTON_PIN,  "ENCODER_BTN",     "IN"},
+    {WATER_METER_PIN,     "WATER_METER",     "IN"},
+    {FLOW_SWITCH_PIN,     "FLOW_SWITCH",     "IN"},
+    {AUX_INPUT1_PIN,      "AUX_INPUT1",      "IN"},
+    {EZO_EC_RX_PIN,       "EZO_EC_RX",       "IN"},
+    {MAX31865_MISO_PIN,   "MAX31865_MISO",   "IN"},
 };
 const int numInputs = sizeof(inputPins) / sizeof(inputPins[0]);
-
-PinInfo adcPins[] = {
-    {COND_SENSE_PIN, "COND_SENSE", "ADC"},
-    {TEMP_SENSE_PIN, "TEMP_SENSE", "ADC"},
-    {WATER_METER1_PIN, "WATER_METER1", "ADC"},
-    {WATER_METER2_PIN, "WATER_METER2", "ADC"},
-};
-const int numADC = sizeof(adcPins) / sizeof(adcPins[0]);
 
 // ============================================================================
 // SETUP
@@ -136,6 +86,7 @@ void setup() {
     Serial.println();
     Serial.println("========================================");
     Serial.println("  GPIO PIN TEST PROGRAM");
+    Serial.println("  (using pin_definitions.h)");
     Serial.println("========================================");
     Serial.println();
 
@@ -148,14 +99,16 @@ void setup() {
         digitalWrite(outputPins[i].pin, LOW);
     }
 
-    // Configure inputs with pull-up
+    // Configure inputs with pull-up (where possible)
+    // Note: GPIO34-39 are input-only with NO internal pull-up;
+    // they rely on external pull-ups on the PCB.
     for (int i = 0; i < numInputs; i++) {
-        pinMode(inputPins[i].pin, INPUT_PULLUP);
+        if (inputPins[i].pin < 34) {
+            pinMode(inputPins[i].pin, INPUT_PULLUP);
+        } else {
+            pinMode(inputPins[i].pin, INPUT);
+        }
     }
-
-    // Configure ADC
-    analogReadResolution(12);
-    analogSetAttenuation(ADC_11db);
 
     Serial.println("All pins configured.");
     printPinMap();
@@ -187,10 +140,6 @@ void processCommand(char cmd) {
             testAllInputs();
             break;
 
-        case 'a':
-            testAllADC();
-            break;
-
         case 'r':
             testRelays();
             break;
@@ -199,8 +148,8 @@ void processCommand(char cmd) {
             testStepperPins();
             break;
 
-        case 'b':
-            testButtons();
+        case 'e':
+            testEncoder();
             break;
 
         case 'c':
@@ -268,7 +217,7 @@ void testAllInputs() {
 
     for (int i = 0; i < numInputs; i++) {
         int state = digitalRead(inputPins[i].pin);
-        Serial.printf("  GPIO%02d %-15s: %s\n",
+        Serial.printf("  GPIO%02d %-20s: %s\n",
                       inputPins[i].pin,
                       inputPins[i].name,
                       state ? "HIGH (open)" : "LOW (active)");
@@ -277,44 +226,16 @@ void testAllInputs() {
     Serial.println();
 }
 
-void testAllADC() {
-    Serial.println();
-    Serial.println("=== ADC PIN TEST ===");
-    Serial.println("Reading all ADC pins 5 times...");
-    Serial.println();
-
-    for (int sample = 0; sample < 5; sample++) {
-        Serial.printf("Sample %d:\n", sample + 1);
-        for (int i = 0; i < numADC; i++) {
-            int value = analogRead(adcPins[i].pin);
-            float voltage = value * 3.3 / 4095.0;
-            Serial.printf("  GPIO%02d %-15s: %4d (%.3fV)\n",
-                          adcPins[i].pin,
-                          adcPins[i].name,
-                          value, voltage);
-        }
-        Serial.println();
-        delay(500);
-    }
-}
-
 void testRelays() {
     Serial.println();
-    Serial.println("=== RELAY TEST ===");
+    Serial.println("=== BLOWDOWN RELAY TEST ===");
     Serial.println();
 
-    Serial.println("Blowdown relay ON (20mA = OPEN)...");
+    Serial.println("Relay ON (GPIO4 HIGH → 20mA → OPEN)...");
     digitalWrite(BLOWDOWN_RELAY_PIN, HIGH);
     delay(1000);
-    Serial.println("Blowdown relay OFF (4mA = CLOSED)");
+    Serial.println("Relay OFF (GPIO4 LOW → 4mA → CLOSED)");
     digitalWrite(BLOWDOWN_RELAY_PIN, LOW);
-    delay(500);
-
-    Serial.println("Alarm relay ON...");
-    digitalWrite(ALARM_RELAY_PIN, HIGH);
-    delay(1000);
-    Serial.println("Alarm relay OFF");
-    digitalWrite(ALARM_RELAY_PIN, LOW);
 
     Serial.println();
     Serial.println("Relay test complete.");
@@ -325,36 +246,35 @@ void testStepperPins() {
     Serial.println("=== STEPPER PIN TEST ===");
     Serial.println();
 
+    struct StepperPins { int step; int dir; const char* name; };
+    StepperPins steppers[] = {
+        {STEPPER1_STEP_PIN, STEPPER1_DIR_PIN, STEPPER1_NAME},
+        {STEPPER2_STEP_PIN, STEPPER2_DIR_PIN, STEPPER2_NAME},
+        {STEPPER3_STEP_PIN, STEPPER3_DIR_PIN, STEPPER3_NAME},
+    };
+
     // Enable drivers
     Serial.println("Enabling stepper drivers (ENABLE LOW)...");
     digitalWrite(STEPPER_ENABLE_PIN, LOW);
     delay(100);
 
-    // Test each stepper
-    for (int stepper = 1; stepper <= 3; stepper++) {
-        int stepPin, dirPin;
-        switch (stepper) {
-            case 1: stepPin = STEPPER1_STEP_PIN; dirPin = STEPPER1_DIR_PIN; break;
-            case 2: stepPin = STEPPER2_STEP_PIN; dirPin = STEPPER2_DIR_PIN; break;
-            case 3: stepPin = STEPPER3_STEP_PIN; dirPin = STEPPER3_DIR_PIN; break;
-        }
-
-        Serial.printf("Stepper %d: 100 steps forward...\n", stepper);
-        digitalWrite(dirPin, HIGH);
+    for (int s = 0; s < 3; s++) {
+        Serial.printf("Stepper %s: 100 steps forward...\n", steppers[s].name);
+        digitalWrite(steppers[s].dir, HIGH);
         for (int i = 0; i < 100; i++) {
-            digitalWrite(stepPin, HIGH);
+            digitalWrite(steppers[s].step, HIGH);
             delayMicroseconds(500);
-            digitalWrite(stepPin, LOW);
+            digitalWrite(steppers[s].step, LOW);
             delayMicroseconds(500);
         }
         delay(200);
 
-        Serial.printf("Stepper %d: 100 steps reverse...\n", stepper);
-        digitalWrite(dirPin, LOW);
+        Serial.printf("Stepper %s: 100 steps reverse...\n", steppers[s].name);
+        digitalWrite(steppers[s].dir, LOW);
         for (int i = 0; i < 100; i++) {
-            digitalWrite(stepPin, HIGH);
+            digitalWrite(steppers[s].step, HIGH);
             delayMicroseconds(500);
-            digitalWrite(stepPin, LOW);
+            digitalWrite(steppers[s].step, LOW);
             delayMicroseconds(500);
         }
         delay(200);
@@ -368,33 +288,40 @@ void testStepperPins() {
     Serial.println("Stepper pin test complete.");
 }
 
-void testButtons() {
+void testEncoder() {
     Serial.println();
-    Serial.println("=== BUTTON TEST ===");
-    Serial.println("Press each button within 10 seconds...");
-    Serial.println("(Buttons are active LOW with pull-up)");
+    Serial.println("=== ENCODER TEST (10 seconds) ===");
+    Serial.println("Rotate encoder and press button...");
     Serial.println();
 
-    bool buttonPressed[numInputs] = {false};
     uint32_t startTime = millis();
+    bool lastA = digitalRead(ENCODER_PIN_A);
+    bool lastB = digitalRead(ENCODER_PIN_B);
+    bool lastBtn = digitalRead(ENCODER_BUTTON_PIN);
 
-    while (millis() - startTime < 10000) {
-        for (int i = 0; i < numInputs; i++) {
-            if (!buttonPressed[i] && digitalRead(inputPins[i].pin) == LOW) {
-                buttonPressed[i] = true;
-                Serial.printf("  %s pressed!\n", inputPins[i].name);
-            }
+    while (millis() - startTime < 10000 && !Serial.available()) {
+        bool a = digitalRead(ENCODER_PIN_A);
+        bool b = digitalRead(ENCODER_PIN_B);
+        bool btn = digitalRead(ENCODER_BUTTON_PIN);
+
+        if (a != lastA || b != lastB) {
+            Serial.printf("[%6lu] CLK=%d DT=%d\n", millis() - startTime, a, b);
+            lastA = a;
+            lastB = b;
         }
-        delay(50);
+
+        if (btn != lastBtn) {
+            Serial.printf("[%6lu] BTN %s\n", millis() - startTime,
+                          btn ? "RELEASED" : "PRESSED");
+            lastBtn = btn;
+        }
+
+        delay(2);
     }
 
+    if (Serial.available()) Serial.read();
     Serial.println();
-    Serial.println("Button test complete. Summary:");
-    for (int i = 0; i < numInputs; i++) {
-        Serial.printf("  %-15s: %s\n", inputPins[i].name,
-                      buttonPressed[i] ? "PRESSED" : "not pressed");
-    }
-    Serial.println();
+    Serial.println("Encoder test complete.");
 }
 
 void continuousInputMonitor() {
@@ -416,7 +343,7 @@ void continuousInputMonitor() {
         for (int i = 0; i < numInputs; i++) {
             int state = digitalRead(inputPins[i].pin);
             if (state != lastState[i]) {
-                Serial.printf("[%6lu] %-15s: %s -> %s\n",
+                Serial.printf("[%6lu] %-20s: %s -> %s\n",
                               millis() - startTime,
                               inputPins[i].name,
                               lastState[i] ? "HIGH" : "LOW",
@@ -471,11 +398,11 @@ void scanI2C() {
             Serial.printf("  Found device at 0x%02X", addr);
 
             // Identify common devices
-            if (addr == 0x27 || addr == 0x3F) Serial.print(" (LCD)");
-            else if (addr == 0x48) Serial.print(" (ADS1115/TMP102)");
-            else if (addr == 0x50) Serial.print(" (EEPROM)");
-            else if (addr == 0x68) Serial.print(" (DS3231 RTC)");
-            else if (addr == 0x76 || addr == 0x77) Serial.print(" (BME280)");
+            if (addr == LCD_I2C_ADDR)       Serial.print(" (LCD)");
+            else if (addr == ADS1115_I2C_ADDR) Serial.print(" (ADS1115)");
+            else if (addr == 0x3F)          Serial.print(" (LCD alt)");
+            else if (addr == 0x50)          Serial.print(" (EEPROM)");
+            else if (addr == 0x68)          Serial.print(" (DS3231 RTC)");
 
             Serial.println();
             found++;
@@ -496,7 +423,7 @@ void scanI2C() {
 
 void printPinMap() {
     Serial.println();
-    Serial.println("=== PIN MAP ===");
+    Serial.println("=== PIN MAP (from pin_definitions.h) ===");
     Serial.println();
 
     Serial.println("Output Pins:");
@@ -505,15 +432,10 @@ void printPinMap() {
     }
 
     Serial.println();
-    Serial.println("Input Pins (with pull-up):");
+    Serial.println("Input Pins:");
     for (int i = 0; i < numInputs; i++) {
-        Serial.printf("  GPIO%02d  %s\n", inputPins[i].pin, inputPins[i].name);
-    }
-
-    Serial.println();
-    Serial.println("ADC Pins:");
-    for (int i = 0; i < numADC; i++) {
-        Serial.printf("  GPIO%02d  %s\n", adcPins[i].pin, adcPins[i].name);
+        Serial.printf("  GPIO%02d  %s%s\n", inputPins[i].pin, inputPins[i].name,
+                      (inputPins[i].pin >= 34) ? " (input-only, ext pull-up)" : "");
     }
 
     Serial.println();
@@ -534,16 +456,13 @@ void printMenu() {
     Serial.println("Output Tests:");
     Serial.println("  o - Test all outputs (sequential HIGH)");
     Serial.println("  w - Wiggle all outputs (5 sec)");
-    Serial.println("  r - Test relays only");
+    Serial.println("  r - Test blowdown relay");
     Serial.println("  s - Test stepper pins");
     Serial.println();
     Serial.println("Input Tests:");
     Serial.println("  i - Read all inputs (one-shot)");
-    Serial.println("  b - Button test (10 sec)");
+    Serial.println("  e - Encoder test (10 sec)");
     Serial.println("  c - Continuous input monitor (30 sec)");
-    Serial.println();
-    Serial.println("ADC Tests:");
-    Serial.println("  a - Read all ADC pins");
     Serial.println();
     Serial.println("Other:");
     Serial.println("  2 - Scan I2C bus");

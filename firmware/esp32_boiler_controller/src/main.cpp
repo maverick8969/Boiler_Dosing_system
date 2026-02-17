@@ -158,11 +158,8 @@ void setup() {
     pinMode(AUX_INPUT1_PIN, INPUT_PULLUP);
     // Note: AUX_INPUT2 (GPIO18) repurposed for MAX31865 SCK
 
-    // Initialize buttons
-    pinMode(BTN_UP_PIN, INPUT_PULLUP);
-    pinMode(BTN_DOWN_PIN, INPUT_PULLUP);
-    pinMode(BTN_ENTER_PIN, INPUT_PULLUP);
-    pinMode(BTN_MENU_PIN, INPUT_PULLUP);
+    // Rotary encoder pins are initialized by the encoder module's begin().
+    // The encoder push button (GPIO0) is the sole physical button (select/menu).
 
     // Create FreeRTOS tasks
     Serial.println("Creating tasks...");
@@ -582,46 +579,57 @@ void checkAlarms() {
 }
 
 // ============================================================================
-// INPUT PROCESSING
+// INPUT PROCESSING (Rotary Encoder — sole input device)
 // ============================================================================
+// Rotate CW  → next screen / increment value
+// Rotate CCW → prev screen / decrement value
+// Short press → select / confirm
+// Long press  → enter / exit menu
 
 void processInputs() {
     static uint32_t last_button_time = 0;
-    static bool last_up = true, last_down = true, last_enter = true, last_menu = true;
+    static bool last_btn = true;
+    static uint32_t btn_press_start = 0;
+    static bool long_press_fired = false;
 
-    // Debounce delay
-    if (millis() - last_button_time < 200) return;
+    // --- Encoder rotation (interrupt-driven count read) ---
+    // The encoder module accumulates steps via ISR on ENCODER_PIN_A / _B.
+    // TODO: Read encoder delta from encoder module when integrated.
+    // For now, stub: display.nextScreen() / display.prevScreen()
+    // will be driven by the encoder callback.
 
-    bool up = digitalRead(BTN_UP_PIN);
-    bool down = digitalRead(BTN_DOWN_PIN);
-    bool enter = digitalRead(BTN_ENTER_PIN);
-    bool menu = digitalRead(BTN_MENU_PIN);
+    // --- Encoder push button (GPIO0, active LOW) ---
+    bool btn = digitalRead(ENCODER_BUTTON_PIN);
 
-    // Detect button presses (active LOW)
-    if (!up && last_up) {
-        last_button_time = millis();
-        display.prevScreen();
+    // Debounce
+    if (millis() - last_button_time < ENCODER_BTN_DEBOUNCE_MS) {
+        last_btn = btn;
+        return;
     }
 
-    if (!down && last_down) {
-        last_button_time = millis();
-        display.nextScreen();
+    // Button pressed (falling edge)
+    if (!btn && last_btn) {
+        btn_press_start = millis();
+        long_press_fired = false;
     }
 
-    if (!enter && last_enter) {
+    // Button held — detect long press
+    if (!btn && !long_press_fired &&
+        (millis() - btn_press_start >= ENCODER_LONG_PRESS_MS)) {
+        long_press_fired = true;
         last_button_time = millis();
-        // Enter button - could toggle manual mode
+        // Long press: enter/exit menu
+        display.toggleMenu();
     }
 
-    if (!menu && last_menu) {
+    // Button released (rising edge) — short press if long press was not fired
+    if (btn && !last_btn && !long_press_fired) {
         last_button_time = millis();
-        // Menu button - could enter configuration menu
+        // Short press: select / confirm
+        display.select();
     }
 
-    last_up = up;
-    last_down = down;
-    last_enter = enter;
-    last_menu = menu;
+    last_btn = btn;
 }
 
 // ============================================================================

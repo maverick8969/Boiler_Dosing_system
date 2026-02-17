@@ -45,7 +45,7 @@
               3V3 ────────┤ 3V3      VIN ├──────── 5V
               GND ────────┤ GND      GND ├──────── GND
                           │              │
-  Encoder Button ← GPIO0 ┤ D0       D23 ├ GPIO23 → MAX31865 MOSI / SPI MOSI
+  Enc Btn (sel) ← GPIO0  ┤ D0       D23 ├ GPIO23 → MAX31865 MOSI
    Encoder B/DT ← GPIO2  ┤ D2       D22 ├ GPIO22 → I2C SCL (LCD + ADS1115)
   Blowdown Relay → GPIO4 ┤ D4       D1  ├ TX0      (USB Serial - reserved)
    WS2812 Data  → GPIO5  ┤ D5       D3  ├ RX0      (USB Serial - reserved)
@@ -54,11 +54,13 @@
                           │  GPIO 6–11   │
                           │  DO NOT USE  │
                           │              │
-  Stepper1 STEP → GPIO12 ┤ D12      D21 ├ GPIO21 → I2C SDA (LCD + ADS1115)
-  Stepper EN    → GPIO13 ┤ D13      D19 ├ GPIO19 ← Menu Button (opt.)
+  Stepper1 STEP → GPIO12 ┤ D12*     D21 ├ GPIO21 → I2C SDA (LCD + ADS1115)
+  Stepper EN    → GPIO13 ┤ D13      D19 ├ GPIO19    (free)
   Stepper1 DIR  → GPIO14 ┤ D14      D18 ├ GPIO18 → MAX31865 SCK
   Encoder A/CLK ← GPIO15 ┤ D15      D5  │         (see above)
   MAX31865 CS   → GPIO16 ┤ D16      D17 ├ GPIO17 ← AUX Input (Drum Level)
+
+  * GPIO12 = strapping pin. External 10k pull-down to GND required.
                           │              │
   EZO-EC TX     → GPIO25 ┤ D25      D16 │         (see above)
   Stepper2 DIR  → GPIO26 ┤ D26      D4  │         (see above)
@@ -82,18 +84,18 @@
 
 | GPIO | Function | Dir | Peripheral | Bus | Notes |
 |------|----------|-----|------------|-----|-------|
-| **0** | Encoder Push Button | IN | KY-040 SW | — | Strapping pin! Must be HIGH at boot. External 10k pull-up required. Active LOW. |
+| **0** | Encoder Button (select/menu) | IN | KY-040 SW | — | Strapping pin! External 10k pull-up required. Active LOW. Short press=select, long press=menu. |
 | **2** | Encoder Output B (DT) | IN | KY-040 DT | — | Strapping pin. Must be LOW for serial flash. |
 | **4** | Blowdown Relay Coil | OUT | 2N7000 MOSFET gate | — | Drives SPDT relay via N-ch MOSFET. LOW=closed, HIGH=open. |
-| **5** | WS2812 LED Data | OUT | WS2812B strip (8 LEDs) | — | 3.3V→5V level shifter recommended. |
-| **12** | Stepper 1 STEP (H2SO3) | OUT | A4988 #1 STEP | — | Strapping pin (must be LOW at boot). |
+| **5** | WS2812 LED Data | OUT | WS2812B strip (8 LEDs) | — | 330 ohm series resistor on data line. |
+| **12** | Stepper 1 STEP (H2SO3) | OUT | A4988 #1 STEP | — | **Strapping pin! External 10k pull-down to GND required.** |
 | **13** | Stepper Common ENABLE | OUT | A4988 #1/#2/#3 EN | — | Active LOW. Shared by all 3 drivers. |
 | **14** | Stepper 1 DIR (H2SO3) | OUT | A4988 #1 DIR | — | |
-| **15** | Encoder Output A (CLK) | IN | KY-040 CLK | — | Strapping pin. |
+| **15** | Encoder Output A (CLK) | IN | KY-040 CLK | — | Strapping pin. Pull-up keeps HIGH at boot (OK). |
 | **16** | MAX31865 Chip Select | OUT | Adafruit MAX31865 | Soft SPI | Active LOW. |
 | **17** | AUX Input 1 (Drum Level) | IN | Dry contact switch | — | Internal pull-up enabled. |
 | **18** | MAX31865 SCK | OUT | Adafruit MAX31865 | Soft SPI | Clock for PT1000 RTD. |
-| **19** | Menu Button (optional) | IN | Pushbutton | — | Optional 4th navigation button. Internal pull-up. |
+| **19** | *(free)* | — | — | — | Available for future expansion. |
 | **21** | I2C SDA | I/O | LCD (0x27) + ADS1115 (0x48) | I2C | 4.7k pull-up to 3.3V. 400 kHz Fast Mode. |
 | **22** | I2C SCL | OUT | LCD (0x27) + ADS1115 (0x48) | I2C | 4.7k pull-up to 3.3V. |
 | **23** | MAX31865 MOSI | OUT | Adafruit MAX31865 | Soft SPI | Data out to RTD board. |
@@ -102,7 +104,7 @@
 | **27** | Stepper 2 STEP (NaOH) | OUT | A4988 #2 STEP | — | |
 | **32** | Stepper 3 DIR (Amine) | OUT | A4988 #3 DIR | — | |
 | **33** | Stepper 3 STEP (Amine) | OUT | A4988 #3 STEP | — | |
-| **34** | Water Meter Pulse | IN | Contact closure (1 pulse/gal) | — | Input-only. No pull-up. External 10k pull-up to 3.3V required. Interrupt-driven. |
+| **34** | Water Meter Pulse | IN | Contact closure (1 pulse/gal) | — | Input-only. External 10k pull-up to 3.3V required. Interrupt-driven. |
 | **35** | Flow Switch | IN | SPDT flow switch | — | Input-only. External 10k pull-up to 3.3V. Active LOW. |
 | **36** | EZO-EC UART RX | IN | Atlas EZO-EC TX | UART2 | Input-only. ESP32 RX ← EZO TX. |
 | **39** | MAX31865 MISO | IN | Adafruit MAX31865 | Soft SPI | Input-only. Data in from RTD board. |
@@ -129,16 +131,21 @@ Three peristaltic/dosing pumps driven by Nema17 steppers through A4988 driver bo
     ESP32               │         (Hydrogen Sulfite — H2SO3)          │
    ┌──────┐             │                                              │
    │GPIO12├─── STEP ───→┤ STEP                              COIL A+ ──├──→ Nema17
-   │GPIO14├─── DIR  ───→┤ DIR           A4988               COIL A- ──├──→ Motor
-   │GPIO13├─── EN   ───→┤ EN (active LOW)                   COIL B+ ──├──→ Winding
-   └──────┘             │                                   COIL B- ──├──→ Leads
-                        │ VMOT ←── 12V                                │
-                        │ GND  ←── GND                                │
-                        │ VDD  ←── 3.3V (logic)                       │
-                        │                                              │
+   │       │    │        │           A4988               COIL A- ──├──→ Motor
+   │       │  ┌─┴──┐     │                                COIL B+ ──├──→ Winding
+   │       │  │10k │     │                                COIL B- ──├──→ Leads
+   │       │  │pull│     │                                            │
+   │       │  │down│     │ VMOT ←── 12V                              │
+   │       │  └─┬──┘     │ GND  ←── GND                              │
+   │       │    GND      │ VDD  ←── 3.3V (logic)                     │
+   │GPIO14├─── DIR  ───→┤ DIR                                        │
+   │GPIO13├─── EN   ───→┤ EN (active LOW)                            │
+   └──────┘             │                                              │
                         │ MS1 MS2 MS3: Set for 1/16 microstepping     │
                         │ (MS1=H, MS2=H, MS3=H)                       │
                         └──────────────────────────────────────────────┘
+    NOTE: GPIO12 is a strapping pin. The 10k pull-down resistor to GND
+    is REQUIRED to ensure LOW at boot (selects 3.3V flash voltage).
 
                         ┌──────────────────────────────────────────────┐
                         │              A4988 Driver Board #2           │
@@ -481,7 +488,11 @@ Three peristaltic/dosing pumps driven by Nema17 steppers through A4988 driver bo
 
 ---
 
-### 9. Rotary Encoder (KY-040) — Primary Navigation
+### 9. Rotary Encoder (KY-040) — Sole Input Device
+
+The rotary encoder is the **only physical input device**. Rotation
+navigates menus / adjusts values. The push button serves as both
+select (short press) and menu enter/exit (long press).
 
 ```
                     3.3V
@@ -501,11 +512,14 @@ Three peristaltic/dosing pumps driven by Nema17 steppers through A4988 driver bo
                                     Active LOW
 
     ┌──────────────────────────────────────────────────────────┐
-    │ Steps Per Notch:       4 pulses per detent               │
-    │ Rotation Debounce:     5 ms                              │
-    │ Button Debounce:       50 ms                             │
-    │ Long Press:            1500 ms                           │
-    │ Double Press Window:   300 ms                            │
+    │ Rotate CW:       Next screen / increment value           │
+    │ Rotate CCW:      Prev screen / decrement value           │
+    │ Short press:     Select / confirm                        │
+    │ Long press:      Enter / exit menu (1500 ms threshold)   │
+    │                                                          │
+    │ Steps Per Notch:     4 pulses per detent                 │
+    │ Rotation Debounce:   5 ms                                │
+    │ Button Debounce:     50 ms                               │
     │                                                          │
     │ GPIO0 NOTE: This is a boot strapping pin. An external    │
     │ 10k pull-up to 3.3V is REQUIRED. The encoder button      │
@@ -659,6 +673,7 @@ Three peristaltic/dosing pumps driven by Nema17 steppers through A4988 driver bo
 |-----|-----------|-------|-------|
 | 2 | I2C Pull-up Resistors | 4.7 kohm | SDA and SCL to 3.3V |
 | 3 | Input Pull-up Resistors | 10 kohm | GPIO34, GPIO35, GPIO0 to 3.3V |
+| 1 | GPIO12 Pull-down Resistor | 10 kohm | GPIO12 to GND — **required** for boot strapping |
 | 1 | WS2812 Series Resistor | 330-470 ohm | Data line protection |
 | 1 | WS2812 Bypass Cap | 100-470 uF electrolytic | Power filtering near first LED |
 | 1 | 100 nF Decoupling Cap | 0.1 uF ceramic | Near ADS1115 VDD |
@@ -692,7 +707,9 @@ Three peristaltic/dosing pumps driven by Nema17 steppers through A4988 driver bo
 
 ## Design Notes and Warnings
 
-1. **Strapping Pins:** GPIO0, GPIO2, GPIO12, and GPIO15 affect boot behavior. Ensure no external circuitry holds these pins in states that prevent normal boot or serial flashing.
+1. **Strapping Pins:** GPIO0, GPIO2, GPIO12, and GPIO15 affect boot behavior. **GPIO12 requires an external 10k pull-down resistor to GND** to guarantee the flash voltage regulator stays at 3.3V. GPIO0 requires a 10k pull-up (provided for the encoder button). GPIO15's encoder pull-up keeps it HIGH (enables boot log — safe). Alternatively, burn the VDD_SDIO eFuse once with `espefuse.py set_flash_voltage 3.3V` to permanently ignore GPIO12's strapping function.
+
+9. **GPIO19 is free.** It can be used for future expansion (e.g., alarm relay, SD card CS, additional sensor).
 
 2. **Input-Only Pins:** GPIO34, GPIO35, GPIO36 (VP), and GPIO39 (VN) are input-only with no internal pull-up/pull-down. External pull-up resistors are required for digital inputs on these pins.
 
