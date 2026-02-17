@@ -49,7 +49,7 @@ void scanI2C();
 #define STEPPER3_DIR_PIN    14
 
 // Relay outputs
-#define BLOWDOWN_RELAY_PIN  15
+#define BLOWDOWN_RELAY_PIN  4   // SPDT relay for 4-20mA valve control
 #define ALARM_RELAY_PIN     2
 
 // Sensor inputs (ADC)
@@ -303,10 +303,10 @@ void testRelays() {
     Serial.println("=== RELAY TEST ===");
     Serial.println();
 
-    Serial.println("Blowdown relay ON...");
+    Serial.println("Blowdown relay ON (20mA = OPEN)...");
     digitalWrite(BLOWDOWN_RELAY_PIN, HIGH);
     delay(1000);
-    Serial.println("Blowdown relay OFF");
+    Serial.println("Blowdown relay OFF (4mA = CLOSED)");
     digitalWrite(BLOWDOWN_RELAY_PIN, LOW);
     delay(500);
 

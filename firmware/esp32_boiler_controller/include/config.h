@@ -197,6 +197,7 @@ typedef struct {
     hoa_mode_t hoa_mode;            // Hand-Off-Auto mode
     bool timeout_flag;              // Set when timeout occurs
     uint32_t accumulated_time;      // Total blowdown time (seconds, persistent)
+    bool feedback_enabled;          // Read 4-20mA position feedback from actuator
 } blowdown_config_t;
 
 // Blowdown limits
@@ -207,12 +208,13 @@ typedef struct {
 #define BLOW_TIME_LIMIT_MIN         60      // 1 minute
 #define BLOW_TIME_LIMIT_MAX         32340   // 8:59 hours
 
-// Default blowdown configuration
+// Default blowdown configuration (Assured Automation E26NRXS4UV-EP420C)
 #define BLOW_DEFAULT_SETPOINT       2500    // 2500 uS/cm
 #define BLOW_DEFAULT_DEADBAND       50      // 50 uS/cm
 #define BLOW_DEFAULT_TIME_LIMIT     0       // Unlimited
 #define BLOW_DEFAULT_DIRECTION      0       // HIGH (blowdown above setpoint)
-#define BLOW_DEFAULT_VALVE_DELAY    0       // No delay (solenoid valve)
+#define BLOW_DEFAULT_VALVE_DELAY    20      // S4 actuator cycle time (seconds)
+#define BLOW_DEFAULT_FEEDBACK       true    // Read 4-20mA position feedback
 
 // ============================================================================
 // CHEMICAL PUMP CONFIGURATION STRUCTURE
@@ -502,6 +504,7 @@ typedef struct {
 #define ALARM_DRUM_LEVEL_2          0x0400
 #define ALARM_WIFI_DISCONNECT       0x0800
 #define ALARM_CALIBRATION_DUE       0x1000
+#define ALARM_VALVE_FAULT           0x2000
 
 // ============================================================================
 // NVS STORAGE KEYS

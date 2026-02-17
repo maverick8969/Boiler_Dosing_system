@@ -430,20 +430,30 @@ void Display::drawBlowdownScreen() {
     blowdown_status_t status = blowdownController.getStatus();
 
     _lcd.setCursor(0, 0);
-    _lcd.print("=== Blowdown ===");
+    _lcd.print("=== Blowdown ===    ");
 
+    // Line 1: Valve state + feedback current
     _lcd.setCursor(0, 1);
-    snprintf(line, sizeof(line), "State: %s",
-             status.valve_open ? "OPEN" : "CLOSED");
+    if (status.feedback_mA > 0.1) {
+        snprintf(line, sizeof(line), "%-8s %5.1f mA",
+                 status.valve_open ? "OPEN" : "CLOSED",
+                 status.feedback_mA);
+    } else {
+        snprintf(line, sizeof(line), "%-8s  no fbk ",
+                 status.valve_open ? "OPEN" : "CLOSED");
+    }
     _lcd.print(line);
 
+    // Line 2: Current blowdown time + fault indicator
     _lcd.setCursor(0, 2);
-    snprintf(line, sizeof(line), "Time: %lu sec",
-             status.current_blowdown_time / 1000);
+    snprintf(line, sizeof(line), "Time: %lu sec %s    ",
+             status.current_blowdown_time / 1000,
+             status.valve_fault ? "FLT" : "");
     _lcd.print(line);
 
+    // Line 3: Daily total
     _lcd.setCursor(0, 3);
-    snprintf(line, sizeof(line), "Total: %lu sec",
+    snprintf(line, sizeof(line), "Total: %lu sec      ",
              status.total_blowdown_time);
     _lcd.print(line);
 }

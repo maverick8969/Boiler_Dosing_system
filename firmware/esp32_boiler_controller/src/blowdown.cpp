@@ -1,27 +1,41 @@
 /**
  * @file blowdown.cpp
  * @brief Blowdown Valve Control Implementation
+ *
+ * Controls Assured Automation E26NRXS4UV-EP420C:
+ * - SPDT relay on GPIO4 selects 4mA (closed) or 20mA (open) resistor
+ * - ADS1115 reads 4-20mA position feedback via 150 ohm sense resistor
  */
 
 #include "blowdown.h"
 #include "pin_definitions.h"
+#include <Wire.h>
 
 // Global instance
-// GPIO16 (was BLOWDOWN_NO) repurposed for MAX31865 CS - single relay mode only
-BlowdownController blowdownController(BLOWDOWN_RELAY_PIN, 255);
+BlowdownController blowdownController(BLOWDOWN_RELAY_PIN);
+
+// ============================================================================
+// ADS1115 REGISTER DEFINITIONS (no external library needed)
+// ============================================================================
+
+#define ADS1115_REG_CONVERSION  0x00
+#define ADS1115_REG_CONFIG      0x01
+
+// Config register bits for single-shot read, +/- 4.096V range, 128 SPS
+// MUX bits set per-channel in ads1115ReadChannel()
+#define ADS1115_CONFIG_BASE     0x4183  // OS=1, PGA=001(4.096V), MODE=1, DR=100(128SPS), COMP_QUE=11
 
 // ============================================================================
 // BLOWDOWN CONTROLLER IMPLEMENTATION
 // ============================================================================
 
-BlowdownController::BlowdownController(uint8_t relay_pin, uint8_t nc_pin)
+BlowdownController::BlowdownController(uint8_t relay_pin)
     : _relay_pin(relay_pin)
-    , _nc_pin(nc_pin)
-    , _dual_relay(nc_pin != 255)
     , _config(nullptr)
     , _cond_config(nullptr)
     , _valve_action_start(0)
     , _valve_target_state(false)
+    , _ads1115_available(false)
     , _interval_timer(0)
     , _duration_timer(0)
     , _hold_timer(0)
@@ -33,15 +47,25 @@ BlowdownController::BlowdownController(uint8_t relay_pin, uint8_t nc_pin)
 }
 
 bool BlowdownController::begin() {
+    // Configure relay output (drives SPDT relay via MOSFET)
+    // LOW = relay de-energized = NC = R_close (3.3k) = ~4mA = valve CLOSED
+    // HIGH = relay energized = NO = R_open (680) = ~20mA = valve OPEN
     pinMode(_relay_pin, OUTPUT);
-    digitalWrite(_relay_pin, LOW);  // Start with valve closed
+    digitalWrite(_relay_pin, LOW);  // Start with valve closed (4mA)
 
-    if (_dual_relay) {
-        pinMode(_nc_pin, OUTPUT);
-        digitalWrite(_nc_pin, HIGH);  // NC contact
+    // Check for ADS1115 on I2C bus for position feedback
+    Wire.beginTransmission(ADS1115_I2C_ADDR);
+    _ads1115_available = (Wire.endTransmission() == 0);
+
+    if (_ads1115_available) {
+        Serial.printf("Blowdown: ADS1115 found at 0x%02X - feedback enabled\n",
+                       ADS1115_I2C_ADDR);
+    } else {
+        Serial.println("Blowdown: ADS1115 not found - feedback disabled");
     }
 
-    Serial.printf("Blowdown controller initialized on pin %d\n", _relay_pin);
+    Serial.printf("Blowdown controller initialized on GPIO%d "
+                   "(4-20mA relay-switched control)\n", _relay_pin);
     return true;
 }
 
@@ -58,6 +82,12 @@ void BlowdownController::setConductivityConfig(conductivity_config_t* cond_confi
 
 void BlowdownController::update(float conductivity, bool flow_ok) {
     _status.last_conductivity = conductivity;
+
+    // Read position feedback from actuator
+    if (_config && _config->feedback_enabled) {
+        readFeedback();
+        checkValveFault();
+    }
 
     // No flow protection
     if (!flow_ok) {
@@ -187,6 +217,18 @@ uint32_t BlowdownController::getTotalBlowdownTime() {
 
 void BlowdownController::resetDailyTotal() {
     _status.total_blowdown_time = 0;
+}
+
+float BlowdownController::getFeedbackmA() {
+    return _status.feedback_mA;
+}
+
+bool BlowdownController::isPositionConfirmed() {
+    return _status.position_confirmed;
+}
+
+bool BlowdownController::isValveFault() {
+    return _status.valve_fault;
 }
 
 // ============================================================================
@@ -415,24 +457,15 @@ void BlowdownController::processTimeProportional(float conductivity) {
 
 void BlowdownController::setRelayState(bool energize) {
     _status.relay_energized = energize;
-
-    if (_dual_relay) {
-        // Dual relay for motorized valve
-        if (energize) {
-            digitalWrite(_relay_pin, HIGH);   // NO - open
-            digitalWrite(_nc_pin, LOW);       // NC - not close
-        } else {
-            digitalWrite(_relay_pin, LOW);    // NO - not open
-            digitalWrite(_nc_pin, HIGH);      // NC - close
-        }
-    } else {
-        digitalWrite(_relay_pin, energize ? HIGH : LOW);
-    }
+    // GPIO HIGH = relay energized = NO contact = R_open (680 ohm) = ~20mA = OPEN
+    // GPIO LOW  = relay de-energized = NC contact = R_close (3.3k) = ~4mA = CLOSED
+    digitalWrite(_relay_pin, energize ? HIGH : LOW);
 }
 
 void BlowdownController::startBallValve(bool opening) {
     _valve_target_state = opening;
     _valve_action_start = millis();
+    _status.position_confirmed = false;
     setRelayState(opening);
     transitionState(opening ? BD_STATE_VALVE_OPENING : BD_STATE_VALVE_CLOSING);
 }
@@ -440,17 +473,66 @@ void BlowdownController::startBallValve(bool opening) {
 void BlowdownController::checkBallValveComplete() {
     if (!_config) return;
 
-    uint32_t delay_ms = _config->ball_valve_delay * 1000;
-    if (millis() - _valve_action_start >= delay_ms) {
-        _status.valve_open = _valve_target_state;
-
+    // Use position feedback if available, otherwise fall back to time-based delay
+    if (_config->feedback_enabled && _ads1115_available) {
+        // Check if feedback confirms we reached the target position
+        bool target_reached = false;
         if (_valve_target_state) {
-            // Valve now open
-            _status.blowdown_start_time = millis();
-            transitionState(BD_STATE_BLOWING_DOWN);
+            // Opening: confirmed when feedback > 19 mA
+            target_reached = (_status.feedback_mA > BLOWDOWN_MA_OPEN_MIN);
         } else {
-            // Valve now closed
-            transitionState(BD_STATE_IDLE);
+            // Closing: confirmed when feedback < 5 mA
+            target_reached = (_status.feedback_mA < BLOWDOWN_MA_CLOSED_MAX);
+        }
+
+        if (target_reached) {
+            _status.position_confirmed = true;
+            _status.valve_open = _valve_target_state;
+
+            if (_valve_target_state) {
+                _status.blowdown_start_time = millis();
+                transitionState(BD_STATE_BLOWING_DOWN);
+            } else {
+                // Update accumulated time for feed modes
+                if (_status.state == BD_STATE_VALVE_CLOSING) {
+                    _status.accumulated_blowdown_time += _status.current_blowdown_time;
+                    _status.total_blowdown_time += _status.current_blowdown_time / 1000;
+                }
+                transitionState(BD_STATE_IDLE);
+            }
+            return;
+        }
+
+        // Still use time limit as a safety backstop
+        uint32_t delay_ms = _config->ball_valve_delay * 1000;
+        if (millis() - _valve_action_start >= delay_ms) {
+            // Timed out waiting for feedback confirmation
+            Serial.printf("Blowdown: valve position not confirmed after %d sec "
+                          "(feedback: %.1f mA)\n",
+                          _config->ball_valve_delay, _status.feedback_mA);
+
+            _status.valve_open = _valve_target_state;
+            _status.position_confirmed = false;
+
+            if (_valve_target_state) {
+                _status.blowdown_start_time = millis();
+                transitionState(BD_STATE_BLOWING_DOWN);
+            } else {
+                transitionState(BD_STATE_IDLE);
+            }
+        }
+    } else {
+        // No feedback: use time-based delay only
+        uint32_t delay_ms = _config->ball_valve_delay * 1000;
+        if (millis() - _valve_action_start >= delay_ms) {
+            _status.valve_open = _valve_target_state;
+
+            if (_valve_target_state) {
+                _status.blowdown_start_time = millis();
+                transitionState(BD_STATE_BLOWING_DOWN);
+            } else {
+                transitionState(BD_STATE_IDLE);
+            }
         }
     }
 }
@@ -469,6 +551,83 @@ void BlowdownController::checkTimeout() {
             Serial.println("BLOWDOWN TIMEOUT!");
         }
     }
+}
+
+// ============================================================================
+// 4-20mA POSITION FEEDBACK (ADS1115)
+// ============================================================================
+
+void BlowdownController::readFeedback() {
+    if (!_ads1115_available) return;
+
+    int16_t raw = ads1115ReadChannel(BLOWDOWN_FEEDBACK_ADS_CH);
+
+    // ADS1115 at +/- 4.096V gain: 1 LSB = 0.125 mV
+    float voltage = raw * 0.000125;
+
+    // Convert voltage across sense resistor to current: I = V / R
+    float current_mA = (voltage / BLOWDOWN_FEEDBACK_R_SENSE) * 1000.0;
+
+    // Clamp to reasonable range
+    if (current_mA < 0.0) current_mA = 0.0;
+    if (current_mA > 25.0) current_mA = 25.0;
+
+    _status.feedback_mA = current_mA;
+
+    // Update position confirmation based on commanded state
+    if (_status.relay_energized) {
+        // Commanded OPEN: confirmed when feedback > 19 mA
+        _status.position_confirmed = (current_mA > BLOWDOWN_MA_OPEN_MIN);
+    } else {
+        // Commanded CLOSED: confirmed when feedback < 5 mA
+        _status.position_confirmed = (current_mA < BLOWDOWN_MA_CLOSED_MAX);
+    }
+}
+
+void BlowdownController::checkValveFault() {
+    // Fault if feedback is below minimum valid signal (wiring issue)
+    if (_status.feedback_mA < BLOWDOWN_MA_FAULT_LOW && _ads1115_available) {
+        if (!_status.valve_fault) {
+            _status.valve_fault = true;
+            Serial.printf("VALVE FAULT: feedback %.1f mA (< %.1f mA)\n",
+                          _status.feedback_mA, BLOWDOWN_MA_FAULT_LOW);
+        }
+    } else {
+        _status.valve_fault = false;
+    }
+}
+
+int16_t BlowdownController::ads1115ReadChannel(uint8_t channel) {
+    if (channel > 3) return 0;
+
+    // Build config: single-ended input on specified channel
+    // MUX[14:12] = 100 + channel (AIN0=100, AIN1=101, AIN2=110, AIN3=111)
+    uint16_t config = ADS1115_CONFIG_BASE;
+    config &= ~(0x7000);                       // Clear MUX bits
+    config |= ((0x04 + channel) << 12);        // Set single-ended channel
+
+    // Write config to start conversion
+    Wire.beginTransmission(ADS1115_I2C_ADDR);
+    Wire.write(ADS1115_REG_CONFIG);
+    Wire.write((uint8_t)(config >> 8));
+    Wire.write((uint8_t)(config & 0xFF));
+    Wire.endTransmission();
+
+    // Wait for conversion (128 SPS = ~8ms per sample)
+    delay(10);
+
+    // Read conversion result
+    Wire.beginTransmission(ADS1115_I2C_ADDR);
+    Wire.write(ADS1115_REG_CONVERSION);
+    Wire.endTransmission();
+
+    Wire.requestFrom((uint8_t)ADS1115_I2C_ADDR, (uint8_t)2);
+    if (Wire.available() == 2) {
+        int16_t result = (Wire.read() << 8) | Wire.read();
+        return result;
+    }
+
+    return 0;
 }
 
 void BlowdownController::transitionState(blowdown_state_t new_state) {

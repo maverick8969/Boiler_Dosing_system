@@ -2,10 +2,13 @@
  * @file blowdown.h
  * @brief Blowdown Valve Control Module
  *
- * Implements blowdown control with:
+ * Controls Assured Automation E26NRXS4UV-EP420C ball valve:
+ * - 4-20mA command via relay-switched resistor circuit on GPIO4
+ * - 4-20mA position feedback via ADS1115 external ADC
+ * - Full open / full close only (binary operation)
  * - Continuous mode (setpoint-based)
  * - Intermittent sampling modes (I/T/P)
- * - Ball valve delay for motorized actuators
+ * - Position feedback confirmation replaces time-based delay
  * - Timeout protection
  * - HOA (Hand-Off-Auto) control
  */
@@ -50,6 +53,11 @@ typedef struct {
     bool waiting_for_reset;
     float last_conductivity;
     float trapped_sample_conductivity;
+
+    // 4-20mA position feedback (Assured Automation E26NRXS4UV-EP420C)
+    float feedback_mA;                  // Last read feedback current (mA)
+    bool position_confirmed;            // Feedback matches commanded position
+    bool valve_fault;                   // Feedback indicates fault (wiring/stuck)
 } blowdown_status_t;
 
 // ============================================================================
@@ -60,13 +68,12 @@ class BlowdownController {
 public:
     /**
      * @brief Constructor
-     * @param relay_pin GPIO for relay output
-     * @param nc_pin GPIO for NC contact (optional, for dual relay)
+     * @param relay_pin GPIO for SPDT relay coil (selects 4mA/20mA resistor)
      */
-    BlowdownController(uint8_t relay_pin, uint8_t nc_pin = 255);
+    BlowdownController(uint8_t relay_pin);
 
     /**
-     * @brief Initialize controller
+     * @brief Initialize controller and ADS1115 feedback ADC
      * @return true if successful
      */
     bool begin();
@@ -157,11 +164,27 @@ public:
      */
     void resetDailyTotal();
 
+    /**
+     * @brief Get last feedback current reading
+     * @return Current in mA (4.0 = closed, 20.0 = open)
+     */
+    float getFeedbackmA();
+
+    /**
+     * @brief Check if valve position is confirmed by feedback
+     * @return true if feedback matches commanded state
+     */
+    bool isPositionConfirmed();
+
+    /**
+     * @brief Check if valve feedback indicates a fault
+     * @return true if wiring fault or stuck valve detected
+     */
+    bool isValveFault();
+
 private:
     // Hardware
     uint8_t _relay_pin;
-    uint8_t _nc_pin;
-    bool _dual_relay;
 
     // Configuration
     blowdown_config_t* _config;
@@ -173,6 +196,9 @@ private:
     // Ball valve timing
     uint32_t _valve_action_start;
     bool _valve_target_state;
+
+    // ADS1115 feedback
+    bool _ads1115_available;
 
     // Intermittent mode timing
     uint32_t _interval_timer;
@@ -190,6 +216,9 @@ private:
     void startBallValve(bool opening);
     void checkBallValveComplete();
     void checkTimeout();
+    void readFeedback();
+    void checkValveFault();
+    int16_t ads1115ReadChannel(uint8_t channel);
     void transitionState(blowdown_state_t new_state);
     uint32_t calculateProportionalTime(float conductivity);
 };

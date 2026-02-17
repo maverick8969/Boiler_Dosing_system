@@ -366,6 +366,7 @@ String DataLogger::buildReadingJSON(sensor_reading_t* reading) {
     doc["water_meter2"] = reading->water_meter2;
     doc["flow_rate"] = reading->flow_rate;
     doc["blowdown_active"] = reading->blowdown_active;
+    doc["valve_position_mA"] = reading->valve_position_mA;
     doc["pump1_active"] = reading->pump1_active;
     doc["pump2_active"] = reading->pump2_active;
     doc["pump3_active"] = reading->pump3_active;

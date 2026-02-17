@@ -12,7 +12,7 @@
  * - WS2812 RGB LED Strip for Status Indicators
  * - Sensorex CS675HTTC/P1K Conductivity Probe via Atlas Scientific EZO-EC (UART)
  * - PT1000 RTD Temperature Sensor via Adafruit MAX31865 (SPI)
- * - Automated Blowdown Valve (Relay Output)
+ * - Automated Blowdown Valve (Assured Automation E26NRXS4UV-EP420C, 4-20mA)
  *
  * Based on CNC Shield V4.0 architecture adapted for ESP32
  */
@@ -93,16 +93,32 @@
 #define COND_RANGE_MAX          10000         // Maximum range (uS/cm)
 
 // ============================================================================
-// BLOWDOWN VALVE CONTROL
+// BLOWDOWN VALVE CONTROL (Assured Automation E26NRXS4UV-EP420C)
 // ============================================================================
-// Relay output for motorized ball valve or solenoid
+// 1" SS ball valve with S4UV actuator and DPS 4-20mA positioner (fail-closed)
+//
+// Control: SPDT relay selects between two resistors to generate 4mA (closed)
+//          or 20mA (open) from the 24VDC supply into the actuator's DPS input.
+//          GPIO4 drives the relay coil via MOSFET:
+//            LOW  = relay de-energized (NC) = R_close selected = ~4mA  = CLOSED
+//            HIGH = relay energized (NO)    = R_open selected  = ~20mA = OPEN
+//
+// Feedback: Actuator outputs 4-20mA position signal read via ADS1115 external
+//           ADC (I2C). 150 ohm sense resistor converts to 0.6-3.0V.
 
-#define BLOWDOWN_RELAY_PIN      GPIO_NUM_4    // Relay driver output
-#define BLOWDOWN_NC_PIN         GPIO_NUM_4    // Normally Closed contact
-// Note: GPIO16 repurposed for MAX31865 CS. Dual relay output no longer available.
+#define BLOWDOWN_RELAY_PIN      GPIO_NUM_4    // SPDT relay coil (via MOSFET)
 
-// Ball Valve Timing (for motorized actuators)
-#define BALL_VALVE_DELAY_DEFAULT    8         // Default delay in seconds (Worcester style)
+// 4-20mA Position Feedback via ADS1115 (I2C external ADC)
+#define BLOWDOWN_FEEDBACK_ADS_CH    0         // ADS1115 channel 0 for feedback
+#define BLOWDOWN_FEEDBACK_R_SENSE   150.0     // Sense resistor (ohms)
+
+// 4-20mA Current Thresholds for binary position detection
+#define BLOWDOWN_MA_CLOSED_MAX      5.0       // Below this = confirmed closed
+#define BLOWDOWN_MA_OPEN_MIN        19.0      // Above this = confirmed open
+#define BLOWDOWN_MA_FAULT_LOW       3.0       // Below this = wiring fault
+
+// Ball Valve Timing (S4 actuator: 14-30 sec per 90 degrees)
+#define BALL_VALVE_DELAY_DEFAULT    20        // Default delay in seconds (S4 actuator)
 #define BALL_VALVE_DELAY_MAX        99        // Maximum configurable delay
 
 // ============================================================================
@@ -212,9 +228,11 @@
 #define I2C_SCL_PIN             GPIO_NUM_22
 #define I2C_FREQ                400000        // 400kHz Fast Mode
 
-// Optional External ADC (ADS1115) for higher precision
+// External ADC (ADS1115) for blowdown valve 4-20mA position feedback
+// Required: all ESP32 ADC1 input-only pins are occupied; ADS1115 provides
+// 16-bit resolution on the shared I2C bus with no additional GPIO needed.
 #define ADS1115_I2C_ADDR        0x48
-#define USE_EXTERNAL_ADC        false         // Set true if using ADS1115
+#define USE_EXTERNAL_ADC        true          // Required for blowdown valve feedback
 
 // ============================================================================
 // SPI BUS (MAX31865 uses software SPI, hardware SPI available for expansion)
@@ -244,12 +262,12 @@
 // GPIO SUMMARY TABLE
 // ============================================================================
 /*
-| GPIO | Function              | Direction | Notes                    |
-|------|-----------------------|-----------|--------------------------|
-| 0    | ENCODER_BUTTON        | Input     | Push button (strapping!) |
-| 2    | ENCODER_PIN_B (DT)    | Input     | Encoder output B         |
-| 4    | BLOWDOWN_RELAY        | Output    | Relay driver             |
-| 5    | WS2812_DATA           | Output    | LED strip                |
+| GPIO | Function              | Direction | Notes                          |
+|------|-----------------------|-----------|--------------------------------|
+| 0    | ENCODER_BUTTON        | Input     | Push button (strapping!)       |
+| 2    | ENCODER_PIN_B (DT)    | Input     | Encoder output B               |
+| 4    | BLOWDOWN_RELAY        | Output    | SPDT relay for 4-20mA control  |
+| 5    | WS2812_DATA           | Output    | LED strip                      |
 | 12   | STEPPER1_STEP         | Output    | H2SO3 pump step          |
 | 13   | STEPPER_ENABLE        | Output    | Common enable (active LOW)|
 | 14   | STEPPER1_DIR          | Output    | H2SO3 pump direction     |
@@ -269,7 +287,8 @@
 | 34   | WATER_METER           | Input     | Water meter pulses       |
 | 35   | FLOW_SWITCH           | Input     | Flow switch              |
 | 36   | EZO_EC_RX             | Input     | Atlas EZO-EC UART RX     |
-| 39   | MAX31865_MISO         | Input     | RTD SPI data in          |
+| 39   | MAX31865_MISO         | Input     | RTD SPI data in                |
+| I2C  | ADS1115 CH0           | Input     | Blowdown valve 4-20mA feedback |
 */
 
 #endif // PIN_DEFINITIONS_H

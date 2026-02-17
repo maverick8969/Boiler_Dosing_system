@@ -42,6 +42,7 @@ typedef struct {
     uint32_t water_meter2;          // Total gallons
     float flow_rate;                // GPM
     bool blowdown_active;
+    float valve_position_mA;        // 4-20mA feedback (4=closed, 20=open)
     bool pump1_active;
     bool pump2_active;
     bool pump3_active;

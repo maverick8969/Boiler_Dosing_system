@@ -428,6 +428,7 @@ void initializeDefaults() {
     systemConfig.blowdown.control_direction = BLOW_DEFAULT_DIRECTION;
     systemConfig.blowdown.ball_valve_delay = BLOW_DEFAULT_VALVE_DELAY;
     systemConfig.blowdown.hoa_mode = HOA_AUTO;
+    systemConfig.blowdown.feedback_enabled = BLOW_DEFAULT_FEEDBACK;
 
     // Pump defaults
     for (int i = 0; i < 3; i++) {
@@ -533,6 +534,11 @@ void checkAlarms() {
         new_alarms |= ALARM_DRUM_LEVEL_1;
     }
 
+    // Blowdown valve fault (4-20mA feedback out of range)
+    if (blowdownController.isValveFault()) {
+        new_alarms |= ALARM_VALVE_FAULT;
+    }
+
     // Check for new alarms
     uint16_t rising_alarms = new_alarms & ~systemState.active_alarms;
 
@@ -556,6 +562,11 @@ void checkAlarms() {
     if (rising_alarms & ALARM_SENSOR_ERROR) {
         dataLogger.logAlarm(ALARM_SENSOR_ERROR, "SENSOR ERROR", true, 0);
         display.showAlarm("SENSOR ERROR");
+    }
+    if (rising_alarms & ALARM_VALVE_FAULT) {
+        dataLogger.logAlarm(ALARM_VALVE_FAULT, "VALVE FAULT",
+                            true, blowdownController.getFeedbackmA());
+        display.showAlarm("VALVE FAULT");
     }
 
     // Check for cleared alarms
@@ -627,6 +638,7 @@ void logSensorData() {
     reading.water_meter2 = waterMeterManager.getMeter(1)->getTotalVolume();
     reading.flow_rate = waterMeterManager.getCombinedFlowRate();
     reading.blowdown_active = blowdownController.isActive();
+    reading.valve_position_mA = blowdownController.getFeedbackmA();
     reading.pump1_active = pumpManager.getPump(PUMP_H2SO3)->isRunning();
     reading.pump2_active = pumpManager.getPump(PUMP_NAOH)->isRunning();
     reading.pump3_active = pumpManager.getPump(PUMP_AMINE)->isRunning();
