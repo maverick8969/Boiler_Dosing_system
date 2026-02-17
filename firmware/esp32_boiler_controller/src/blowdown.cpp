@@ -7,7 +7,8 @@
 #include "pin_definitions.h"
 
 // Global instance
-BlowdownController blowdownController(BLOWDOWN_RELAY_PIN, BLOWDOWN_NO_PIN);
+// GPIO16 (was BLOWDOWN_NO) repurposed for MAX31865 CS - single relay mode only
+BlowdownController blowdownController(BLOWDOWN_RELAY_PIN, 255);
 
 // ============================================================================
 // BLOWDOWN CONTROLLER IMPLEMENTATION

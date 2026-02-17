@@ -1,69 +1,53 @@
 /**
  * @file conductivity.h
- * @brief Conductivity Measurement Module for Sensorex CS675HTTC-P1K/K=1.0
+ * @brief Conductivity Measurement Module for Sensorex CS675HTTC/P1K
  *
- * Handles conductivity measurement using analog interface with:
- * - AC excitation signal generation
- * - Current-to-voltage conversion reading
- * - Pt1000 RTD temperature compensation
- * - Calibration and anti-flashing features
+ * Hardware:
+ * - Atlas Scientific EZO-EC circuit in UART mode for conductivity measurement
+ * - Adafruit MAX31865 with PT1000 RTD for temperature compensation
+ *
+ * The EZO-EC handles conductivity measurement and internal temperature
+ * compensation. Temperature from the MAX31865 PT1000 RTD is sent to the
+ * EZO via the RT command for accurate compensation. The EZO returns
+ * EC, TDS, Salinity, and Specific Gravity values.
  */
 
 #ifndef CONDUCTIVITY_H
 #define CONDUCTIVITY_H
 
 #include <Arduino.h>
+#include <Adafruit_MAX31865.h>
 #include "config.h"
 
 // ============================================================================
-// CONSTANTS
+// EZO-EC TIMING CONSTANTS
 // ============================================================================
 
-// Pt1000 RTD temperature calculation constants (IEC 60751)
-#define PT1000_R0           1000.0      // Resistance at 0C
-#define PT1000_ALPHA        0.00385     // Temperature coefficient
-#define PT1000_A            3.9083e-3
-#define PT1000_B            -5.775e-7
+#define EZO_READ_TIMEOUT_MS         1000    // Timeout for single reading (R command)
+#define EZO_RT_TIMEOUT_MS           1500    // Timeout for RT command (temp comp + read)
+#define EZO_CMD_TIMEOUT_MS          600     // Timeout for general commands
+#define EZO_CAL_TIMEOUT_MS          1600    // Timeout for calibration commands
+#define EZO_BOOT_DELAY_MS           2000    // Wait for EZO to boot after power-on
 
-// ADC configuration
-#define ADC_RESOLUTION      12          // 12-bit ADC
-#define ADC_MAX_VALUE       4095
-#define ADC_VREF            3.3         // Reference voltage
-#define ADC_SAMPLES         64          // Oversampling for noise reduction
-
-// Conductivity measurement
-#define COND_EXCITATION_FREQ    1000    // 1kHz AC excitation
-#define COND_SETTLE_TIME_MS     100     // Time for signal to settle
-#define COND_READINGS_AVG       10      // Number of readings to average
-
-// Temperature compensation reference
-#define TEMP_REF_CELSIUS        25.0    // Reference temperature for compensation
-
-// ============================================================================
-// CALIBRATION DATA STRUCTURE
-// ============================================================================
-
-typedef struct {
-    float offset;           // Zero offset
-    float slope;            // Scale factor (gain)
-    float temp_offset;      // Temperature offset
-    uint32_t timestamp;     // Last calibration timestamp
-    bool valid;             // Calibration data valid flag
-} calibration_data_t;
+// EZO-EC default temperature (used when no RTD available)
+#define EZO_DEFAULT_TEMP_C          25.0
 
 // ============================================================================
 // MEASUREMENT RESULT STRUCTURE
 // ============================================================================
 
 typedef struct {
-    float raw_conductivity;         // Before any compensation (uS/cm)
-    float temp_compensated;         // After temperature compensation
-    float calibrated;               // After user calibration
-    float temperature_c;            // Current temperature (Celsius)
+    float raw_conductivity;         // EC from EZO before software trim (uS/cm)
+    float temp_compensated;         // EC after EZO temperature compensation (uS/cm)
+    float calibrated;               // After software calibration trim (uS/cm)
+    float tds;                      // Total Dissolved Solids from EZO (ppm)
+    float salinity;                 // Salinity from EZO (PSU)
+    float specific_gravity;         // Specific gravity from EZO
+    float temperature_c;            // Current temperature from MAX31865 (Celsius)
     float temperature_f;            // Current temperature (Fahrenheit)
-    bool sensor_ok;                 // Sensor connection OK
-    bool temp_sensor_ok;            // Temperature sensor OK
-    uint32_t timestamp;             // Reading timestamp
+    bool sensor_ok;                 // EZO-EC connection and reading OK
+    bool temp_sensor_ok;            // MAX31865 PT1000 OK
+    uint32_t timestamp;             // Reading timestamp (millis)
 } conductivity_reading_t;
 
 // ============================================================================
@@ -74,172 +58,274 @@ class ConductivitySensor {
 public:
     /**
      * @brief Constructor
-     * @param excite_pin DAC pin for AC excitation
-     * @param sense_pin ADC pin for conductivity measurement
-     * @param temp_pin ADC pin for Pt1000 temperature measurement
+     * @param ezoSerial HardwareSerial reference for EZO-EC UART (e.g., Serial2)
+     * @param ezoRxPin ESP32 RX pin connected to EZO TX
+     * @param ezoTxPin ESP32 TX pin connected to EZO RX
+     * @param rtdCsPin MAX31865 chip select pin
+     * @param rtdMosiPin MAX31865 MOSI pin (software SPI)
+     * @param rtdMisoPin MAX31865 MISO pin (software SPI)
+     * @param rtdSckPin MAX31865 SCK pin (software SPI)
      */
-    ConductivitySensor(uint8_t excite_pin, uint8_t sense_pin, uint8_t temp_pin);
+    ConductivitySensor(HardwareSerial& ezoSerial,
+                        uint8_t ezoRxPin, uint8_t ezoTxPin,
+                        uint8_t rtdCsPin, uint8_t rtdMosiPin,
+                        uint8_t rtdMisoPin, uint8_t rtdSckPin);
 
     /**
-     * @brief Initialize the sensor hardware
-     * @return true if initialization successful
+     * @brief Initialize EZO-EC UART and MAX31865 SPI
+     * @return true if both devices initialized successfully
      */
     bool begin();
 
     /**
-     * @brief Configure sensor parameters
+     * @brief Configure sensor parameters from system config
      * @param config Pointer to conductivity configuration
      */
     void configure(conductivity_config_t* config);
 
     /**
-     * @brief Take a conductivity measurement
+     * @brief Take a conductivity measurement with temperature compensation
+     *
+     * Reads temperature from MAX31865, sends it to EZO via RT command,
+     * and parses the resulting EC/TDS/SAL/SG values.
+     *
      * @return Measurement result structure
      */
     conductivity_reading_t read();
 
     /**
-     * @brief Read raw ADC value for conductivity
-     * @return Raw ADC value (0-4095)
-     */
-    uint16_t readRawConductivity();
-
-    /**
-     * @brief Read temperature from Pt1000 RTD
-     * @return Temperature in Celsius
+     * @brief Read temperature from MAX31865 PT1000 RTD
+     * @return Temperature in Celsius, or -999 on error
      */
     float readTemperature();
 
     /**
-     * @brief Get the last measurement
+     * @brief Get the last measurement result
      * @return Last measurement result
      */
     conductivity_reading_t getLastReading();
 
-    /**
-     * @brief Perform self-test
-     * @return true if self-test passed (1000 +/- 100 uS/cm simulated)
-     */
-    bool selfTest();
+    // ------------------------------------------------------------------
+    // EZO-EC Calibration (managed by EZO hardware)
+    // ------------------------------------------------------------------
 
     /**
-     * @brief Start calibration mode
-     * @param reference_value Known conductivity value (uS/cm)
+     * @brief Perform dry calibration (must be done first)
+     * @return true if EZO acknowledged
      */
-    void calibrate(float reference_value);
+    bool calibrateDry();
 
     /**
-     * @brief Apply calibration offset
-     * @param percent Calibration percentage (-50 to +50)
+     * @brief Single-point calibration with known solution
+     * @param value Known conductivity in uS/cm
+     * @return true if EZO acknowledged
      */
-    void setCalibrationPercent(int8_t percent);
+    bool calibrateSingle(float value);
 
     /**
-     * @brief Get current calibration percentage
-     * @return Calibration percentage
+     * @brief Two-point low calibration
+     * @param value Known low conductivity in uS/cm
+     * @return true if EZO acknowledged
      */
-    int8_t getCalibrationPercent();
+    bool calibrateLow(float value);
 
     /**
-     * @brief Reset calibration to factory defaults
+     * @brief Two-point high calibration
+     * @param value Known high conductivity in uS/cm
+     * @return true if EZO acknowledged
      */
-    void resetCalibration();
+    bool calibrateHigh(float value);
 
     /**
-     * @brief Set cell constant
-     * @param k Cell constant (default 1.0)
+     * @brief Query EZO calibration status
+     * @return 0=not calibrated, 1=single point, 2=two point
+     */
+    uint8_t getCalibrationStatus();
+
+    /**
+     * @brief Export calibration data from EZO
+     * @return Calibration data string, or empty on error
+     */
+    String exportCalibration();
+
+    /**
+     * @brief Import calibration data to EZO
+     * @param data Calibration data string from exportCalibration()
+     * @return true if EZO acknowledged
+     */
+    bool importCalibration(const String& data);
+
+    // ------------------------------------------------------------------
+    // Configuration
+    // ------------------------------------------------------------------
+
+    /**
+     * @brief Set probe cell constant (K value) on EZO
+     * @param k Cell constant (0.01 - 10.0)
      */
     void setCellConstant(float k);
 
     /**
-     * @brief Set temperature compensation coefficient
-     * @param coeff Temperature coefficient (default 0.02 = 2%/C)
+     * @brief Set TDS conversion factor on EZO
+     * @param factor Conversion factor (0.01 - 1.00, default 0.54)
      */
-    void setTempCoefficient(float coeff);
+    void setTDSConversionFactor(float factor);
 
     /**
      * @brief Enable/disable temperature compensation
-     * @param enable True to enable auto compensation
+     * @param enable True to send RTD temperature to EZO for compensation
      */
     void setTempCompensation(bool enable);
 
     /**
-     * @brief Set manual temperature value
+     * @brief Set manual temperature (used when RTD fails)
      * @param temp_c Temperature in Celsius
      */
     void setManualTemperature(float temp_c);
 
     /**
-     * @brief Enable/disable anti-flashing feature
+     * @brief Enable/disable anti-flashing filter (software low-pass)
      * @param enable True to enable anti-flashing
-     * @param factor Dampening factor (1-10)
+     * @param factor Dampening factor (1-10, higher = more smoothing)
      */
     void setAntiFlash(bool enable, uint8_t factor = 5);
 
     /**
-     * @brief Check if sensor is connected and responding
-     * @return true if sensor OK
+     * @brief Apply software calibration trim percentage
+     * @param percent Calibration percentage (-50 to +50)
+     */
+    void setCalibrationPercent(int8_t percent);
+
+    /**
+     * @brief Get current software calibration trim percentage
+     * @return Calibration percentage
+     */
+    int8_t getCalibrationPercent();
+
+    /**
+     * @brief Configure which parameters EZO includes in output
+     * @param ec Enable conductivity output
+     * @param tds Enable TDS output
+     * @param sal Enable salinity output
+     * @param sg Enable specific gravity output
+     */
+    void setOutputParameters(bool ec, bool tds, bool sal, bool sg);
+
+    // ------------------------------------------------------------------
+    // Status
+    // ------------------------------------------------------------------
+
+    /**
+     * @brief Check if EZO-EC is connected and responding
+     * @return true if EZO sensor OK
      */
     bool isSensorOK();
 
     /**
-     * @brief Check if temperature sensor is OK
+     * @brief Check if MAX31865 PT1000 is OK
      * @return true if temp sensor OK
      */
     bool isTempSensorOK();
 
     /**
-     * @brief Convert conductivity to PPM (TDS)
-     * @param conductivity Conductivity in uS/cm
-     * @param conversion_factor PPM conversion factor (default 0.666)
-     * @return TDS in PPM
+     * @brief Get EZO device information (type, firmware version)
+     * @return Info string, e.g. "?I,EC,2.15"
      */
-    static float conductivityToPPM(float conductivity, float conversion_factor = 0.666);
+    String getDeviceInfo();
 
     /**
-     * @brief Convert temperature from Pt1000 resistance
-     * @param resistance Measured resistance in ohms
-     * @return Temperature in Celsius
+     * @brief Get EZO status (voltage and restart reason)
+     * @return Status string, e.g. "?Status,P,5.02"
      */
-    static float resistanceToTemperature(float resistance);
+    String getDeviceStatus();
+
+    /**
+     * @brief Check MAX31865 for RTD faults
+     * @return Fault register value (0 = no faults)
+     */
+    uint8_t getRTDFault();
+
+    // ------------------------------------------------------------------
+    // EZO Control
+    // ------------------------------------------------------------------
+
+    /**
+     * @brief Put EZO into low-power sleep mode
+     */
+    void sleep();
+
+    /**
+     * @brief Wake EZO from sleep (any command wakes it)
+     */
+    void wake();
+
+    /**
+     * @brief Factory reset EZO (clears all calibration!)
+     */
+    void factoryReset();
+
+    /**
+     * @brief Set EZO LED on/off
+     * @param on True to turn LED on
+     */
+    void setLED(bool on);
+
+    /**
+     * @brief Blink EZO LED white to locate device
+     */
+    void find();
+
+    // ------------------------------------------------------------------
+    // Utility
+    // ------------------------------------------------------------------
+
+    /**
+     * @brief Convert conductivity to PPM using configured factor
+     * @param conductivity Conductivity in uS/cm
+     * @param conversion_factor PPM conversion factor
+     * @return TDS in PPM
+     */
+    static float conductivityToPPM(float conductivity, float conversion_factor = 0.54);
+
+    /**
+     * @brief Send a raw command to EZO and get response
+     * @param command Command string (without CR terminator)
+     * @param timeout_ms Response timeout in milliseconds
+     * @return Response string, or empty on timeout
+     */
+    String sendCommand(const String& command, uint16_t timeout_ms = EZO_CMD_TIMEOUT_MS);
 
 private:
-    // Pin assignments
-    uint8_t _excite_pin;
-    uint8_t _sense_pin;
-    uint8_t _temp_pin;
+    // Hardware interfaces
+    HardwareSerial& _serial;
+    uint8_t _rxPin;
+    uint8_t _txPin;
+    Adafruit_MAX31865 _rtd;
 
     // Configuration
     conductivity_config_t* _config;
-    calibration_data_t _calibration;
+    int8_t _calibration_percent;
 
     // State
     conductivity_reading_t _last_reading;
     bool _initialized;
+    bool _ezo_ok;
+    bool _rtd_ok;
     bool _temp_comp_enabled;
     float _manual_temp;
     bool _anti_flash_enabled;
     uint8_t _anti_flash_factor;
     float _anti_flash_buffer;
+    bool _sleeping;
 
     // Internal methods
-    void generateExcitation();
-    void stopExcitation();
-    uint16_t readADCOversampled(uint8_t pin, uint8_t samples);
-    float adcToVoltage(uint16_t adc_value);
-    float voltageToResistance(float voltage);
-    float voltageToConductivity(float voltage);
-    float applyTempCompensation(float conductivity, float temperature);
-    float applyCalibration(float conductivity);
+    String readResponse(uint16_t timeout_ms);
+    bool isResponseOK(const String& response);
+    bool parseReadingResponse(const String& response,
+                              float& ec, float& tds, float& sal, float& sg);
     float applyAntiFlash(float conductivity);
-    bool checkSensorRange(float conductivity);
-    bool checkTempRange(float temperature);
+    float applySoftwareCalibration(float conductivity);
+    void drainSerial();
 };
-
-// ============================================================================
-// GLOBAL INSTANCE (optional - can be instantiated in main)
-// ============================================================================
-
-// extern ConductivitySensor conductivitySensor;
 
 #endif // CONDUCTIVITY_H

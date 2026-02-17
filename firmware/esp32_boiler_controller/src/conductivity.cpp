@@ -2,44 +2,45 @@
  * @file conductivity.cpp
  * @brief Conductivity Measurement Module Implementation
  *
- * Implements analog conductivity measurement for Sensorex CS675HTTC-P1K/K=1.0
- * with Pt1000 RTD temperature compensation.
+ * Implements conductivity measurement using:
+ * - Atlas Scientific EZO-EC circuit in UART mode
+ * - Adafruit MAX31865 with PT1000 RTD for temperature compensation
+ *
+ * EZO-EC UART Protocol:
+ * - Default 9600 baud, 8N1
+ * - Commands terminated with carriage return (0x0D)
+ * - Responses terminated with carriage return
+ * - Response codes enabled by default (*OK after successful commands)
  */
 
 #include "conductivity.h"
 #include "pin_definitions.h"
-#include <driver/dac.h>
-#include <driver/adc.h>
-#include <esp_adc_cal.h>
-
-// ADC calibration characteristics
-static esp_adc_cal_characteristics_t adc_chars;
-static bool adc_calibrated = false;
 
 // ============================================================================
 // CONSTRUCTOR
 // ============================================================================
 
-ConductivitySensor::ConductivitySensor(uint8_t excite_pin, uint8_t sense_pin, uint8_t temp_pin)
-    : _excite_pin(excite_pin)
-    , _sense_pin(sense_pin)
-    , _temp_pin(temp_pin)
+ConductivitySensor::ConductivitySensor(
+    HardwareSerial& ezoSerial,
+    uint8_t ezoRxPin, uint8_t ezoTxPin,
+    uint8_t rtdCsPin, uint8_t rtdMosiPin,
+    uint8_t rtdMisoPin, uint8_t rtdSckPin)
+    : _serial(ezoSerial)
+    , _rxPin(ezoRxPin)
+    , _txPin(ezoTxPin)
+    , _rtd(rtdCsPin, rtdMosiPin, rtdMisoPin, rtdSckPin)
     , _config(nullptr)
+    , _calibration_percent(0)
     , _initialized(false)
+    , _ezo_ok(false)
+    , _rtd_ok(false)
     , _temp_comp_enabled(true)
-    , _manual_temp(25.0)
+    , _manual_temp(EZO_DEFAULT_TEMP_C)
     , _anti_flash_enabled(false)
     , _anti_flash_factor(5)
     , _anti_flash_buffer(0)
+    , _sleeping(false)
 {
-    // Initialize calibration with defaults
-    _calibration.offset = 0;
-    _calibration.slope = 1.0;
-    _calibration.temp_offset = 0;
-    _calibration.timestamp = 0;
-    _calibration.valid = false;
-
-    // Initialize last reading
     memset(&_last_reading, 0, sizeof(_last_reading));
 }
 
@@ -48,64 +49,75 @@ ConductivitySensor::ConductivitySensor(uint8_t excite_pin, uint8_t sense_pin, ui
 // ============================================================================
 
 bool ConductivitySensor::begin() {
-    // Configure DAC for excitation signal
-    if (_excite_pin == GPIO_NUM_25) {
-        dac_output_enable(DAC_CHANNEL_1);
-    } else if (_excite_pin == GPIO_NUM_26) {
-        dac_output_enable(DAC_CHANNEL_2);
+    Serial.println("Initializing conductivity sensor...");
+
+    // ---- Initialize EZO-EC UART ----
+    _serial.begin(EZO_EC_BAUD_RATE, SERIAL_8N1, _rxPin, _txPin);
+    Serial.printf("  EZO-EC UART: %d baud (TX=GPIO%d, RX=GPIO%d)\n",
+                  EZO_EC_BAUD_RATE, _txPin, _rxPin);
+
+    // Wait for EZO to boot
+    delay(EZO_BOOT_DELAY_MS);
+    drainSerial();
+
+    // Disable continuous mode so we use on-demand readings
+    String resp = sendCommand("C,0", EZO_CMD_TIMEOUT_MS);
+    delay(100);
+    drainSerial();
+
+    // Verify EZO is responding with device info query
+    resp = sendCommand("i", EZO_CMD_TIMEOUT_MS);
+    if (resp.startsWith("?I,EC")) {
+        _ezo_ok = true;
+        Serial.printf("  EZO-EC found: %s\n", resp.c_str());
     } else {
-        Serial.println("Error: Invalid DAC pin for excitation");
-        return false;
+        _ezo_ok = false;
+        Serial.println("  WARNING: EZO-EC not responding or unexpected device");
+        Serial.printf("  Response: '%s'\n", resp.c_str());
     }
 
-    // Configure ADC for conductivity measurement
-    adc1_config_width(ADC_WIDTH_BIT_12);
+    // Enable response codes for reliable command confirmation
+    sendCommand("*OK,1", EZO_CMD_TIMEOUT_MS);
 
-    // Configure conductivity sense pin
-    if (_sense_pin == GPIO_NUM_36) {
-        adc1_config_channel_atten(ADC1_CHANNEL_0, ADC_ATTEN_DB_11);
-    } else if (_sense_pin == GPIO_NUM_39) {
-        adc1_config_channel_atten(ADC1_CHANNEL_3, ADC_ATTEN_DB_11);
-    } else if (_sense_pin == GPIO_NUM_34) {
-        adc1_config_channel_atten(ADC1_CHANNEL_6, ADC_ATTEN_DB_11);
-    } else if (_sense_pin == GPIO_NUM_35) {
-        adc1_config_channel_atten(ADC1_CHANNEL_7, ADC_ATTEN_DB_11);
-    }
+    // Lock protocol to UART to prevent accidental I2C switch
+    sendCommand("Plock,1", EZO_CMD_TIMEOUT_MS);
 
-    // Configure temperature sense pin
-    if (_temp_pin == GPIO_NUM_39) {
-        adc1_config_channel_atten(ADC1_CHANNEL_3, ADC_ATTEN_DB_11);
-    } else if (_temp_pin == GPIO_NUM_36) {
-        adc1_config_channel_atten(ADC1_CHANNEL_0, ADC_ATTEN_DB_11);
-    } else if (_temp_pin == GPIO_NUM_34) {
-        adc1_config_channel_atten(ADC1_CHANNEL_6, ADC_ATTEN_DB_11);
-    } else if (_temp_pin == GPIO_NUM_35) {
-        adc1_config_channel_atten(ADC1_CHANNEL_7, ADC_ATTEN_DB_11);
-    }
+    // ---- Initialize MAX31865 PT1000 RTD ----
+    Serial.printf("  MAX31865: CS=GPIO%d, MOSI=GPIO%d, MISO=GPIO%d, SCK=GPIO%d\n",
+                  MAX31865_CS_PIN, MAX31865_MOSI_PIN, MAX31865_MISO_PIN, MAX31865_SCK_PIN);
 
-    // Characterize ADC for better accuracy
-    esp_adc_cal_value_t val_type = esp_adc_cal_characterize(
-        ADC_UNIT_1,
-        ADC_ATTEN_DB_11,
-        ADC_WIDTH_BIT_12,
-        1100,  // Default Vref
-        &adc_chars
-    );
+    // Determine wire configuration
+    max31865_numwires_t wireConfig = MAX31865_2WIRE;
+    uint8_t cfgWires = (_config) ? _config->rtd_wires : RTD_NUM_WIRES;
+    if (cfgWires == 3) wireConfig = MAX31865_3WIRE;
+    else if (cfgWires == 4) wireConfig = MAX31865_4WIRE;
 
-    if (val_type == ESP_ADC_CAL_VAL_EFUSE_VREF) {
-        Serial.println("ADC: Using eFuse Vref");
-        adc_calibrated = true;
-    } else if (val_type == ESP_ADC_CAL_VAL_EFUSE_TP) {
-        Serial.println("ADC: Using Two Point calibration");
-        adc_calibrated = true;
+    if (!_rtd.begin(wireConfig)) {
+        _rtd_ok = false;
+        Serial.println("  WARNING: MAX31865 initialization failed");
     } else {
-        Serial.println("ADC: Using default Vref");
-        adc_calibrated = false;
+        // Test read to verify RTD is connected
+        float temp = readTemperature();
+        if (temp > -900) {
+            _rtd_ok = true;
+            Serial.printf("  MAX31865 PT1000 OK, current temp: %.1f C\n", temp);
+        } else {
+            _rtd_ok = false;
+            uint8_t fault = _rtd.readFault();
+            Serial.printf("  WARNING: MAX31865 RTD fault: 0x%02X\n", fault);
+            _rtd.clearFault();
+        }
     }
 
-    _initialized = true;
-    Serial.println("Conductivity sensor initialized");
-    return true;
+    _initialized = _ezo_ok;  // Minimum: EZO must work; RTD failure degrades gracefully
+
+    if (_initialized) {
+        Serial.println("Conductivity sensor initialized successfully");
+    } else {
+        Serial.println("ERROR: Conductivity sensor initialization failed");
+    }
+
+    return _initialized;
 }
 
 // ============================================================================
@@ -114,12 +126,28 @@ bool ConductivitySensor::begin() {
 
 void ConductivitySensor::configure(conductivity_config_t* config) {
     _config = config;
-    if (_config) {
-        _temp_comp_enabled = _config->temp_comp_enabled;
-        _anti_flash_enabled = _config->anti_flash_enabled;
-        _anti_flash_factor = _config->anti_flash_factor;
-        _calibration.slope = 1.0 + (_config->calibration_percent / 100.0);
-    }
+    if (!_config) return;
+
+    _temp_comp_enabled = _config->temp_comp_enabled;
+    _anti_flash_enabled = _config->anti_flash_enabled;
+    _anti_flash_factor = _config->anti_flash_factor;
+    _calibration_percent = _config->calibration_percent;
+    _manual_temp = _config->manual_temperature;
+
+    if (!_ezo_ok) return;
+
+    // Set cell constant (K value) on EZO
+    setCellConstant(_config->cell_constant);
+
+    // Set TDS conversion factor
+    setTDSConversionFactor(_config->ppm_conversion_factor);
+
+    // Configure output parameters
+    setOutputParameters(_config->ezo_output_ec, _config->ezo_output_tds,
+                        _config->ezo_output_sal, _config->ezo_output_sg);
+
+    Serial.printf("  EZO configured: K=%.2f, TDS factor=%.2f\n",
+                  _config->cell_constant, _config->ppm_conversion_factor);
 }
 
 // ============================================================================
@@ -133,111 +161,101 @@ conductivity_reading_t ConductivitySensor::read() {
 
     if (!_initialized) {
         result.sensor_ok = false;
+        result.temp_sensor_ok = false;
         return result;
     }
 
-    // Generate excitation and wait for settling
-    generateExcitation();
-    delay(COND_SETTLE_TIME_MS);
-
-    // Read multiple samples and average
-    float cond_sum = 0;
-    float temp_sum = 0;
-    int valid_cond_readings = 0;
-    int valid_temp_readings = 0;
-
-    for (int i = 0; i < COND_READINGS_AVG; i++) {
-        // Read conductivity
-        uint16_t adc_cond = readADCOversampled(_sense_pin, ADC_SAMPLES);
-        float voltage_cond = adcToVoltage(adc_cond);
-        float cond = voltageToConductivity(voltage_cond);
-
-        if (checkSensorRange(cond)) {
-            cond_sum += cond;
-            valid_cond_readings++;
-        }
-
-        // Read temperature
-        uint16_t adc_temp = readADCOversampled(_temp_pin, ADC_SAMPLES);
-        float voltage_temp = adcToVoltage(adc_temp);
-        float resistance = voltageToResistance(voltage_temp);
-        float temp = resistanceToTemperature(resistance);
-
-        if (checkTempRange(temp)) {
-            temp_sum += temp;
-            valid_temp_readings++;
-        }
-
-        delay(10);  // Small delay between readings
+    // Wake EZO if sleeping
+    if (_sleeping) {
+        wake();
     }
 
-    // Stop excitation
-    stopExcitation();
-
-    // Process conductivity
-    if (valid_cond_readings > 0) {
-        result.raw_conductivity = cond_sum / valid_cond_readings;
-        result.sensor_ok = true;
-    } else {
-        result.raw_conductivity = 0;
-        result.sensor_ok = false;
-    }
-
-    // Process temperature
-    if (valid_temp_readings > 0) {
-        result.temperature_c = temp_sum / valid_temp_readings;
-        result.temperature_f = (result.temperature_c * 9.0 / 5.0) + 32.0;
+    // ---- Read temperature from MAX31865 ----
+    float temperature = readTemperature();
+    if (temperature > -900) {
+        result.temperature_c = temperature;
+        result.temperature_f = (temperature * 9.0f / 5.0f) + 32.0f;
         result.temp_sensor_ok = true;
+        _rtd_ok = true;
     } else {
-        // Use manual temperature if auto fails
+        // RTD failed - use manual temperature
         result.temperature_c = _manual_temp;
-        result.temperature_f = (_manual_temp * 9.0 / 5.0) + 32.0;
+        result.temperature_f = (_manual_temp * 9.0f / 5.0f) + 32.0f;
         result.temp_sensor_ok = false;
+        _rtd_ok = false;
     }
 
-    // Apply temperature compensation
-    if (_temp_comp_enabled && result.temp_sensor_ok) {
-        result.temp_compensated = applyTempCompensation(
-            result.raw_conductivity,
-            result.temperature_c
-        );
-    } else if (_temp_comp_enabled) {
-        // Use manual temperature for compensation
-        result.temp_compensated = applyTempCompensation(
-            result.raw_conductivity,
-            _manual_temp
-        );
+    // ---- Read conductivity from EZO-EC ----
+    // Use RT command to send temperature and get reading in one step,
+    // or R command if temperature compensation is disabled
+    String response;
+    float temp_to_send = result.temp_sensor_ok ? result.temperature_c : _manual_temp;
+
+    if (_temp_comp_enabled) {
+        // RT command: set temp compensation and take reading
+        String cmd = "RT," + String(temp_to_send, 1);
+        response = sendCommand(cmd, EZO_RT_TIMEOUT_MS);
     } else {
-        result.temp_compensated = result.raw_conductivity;
+        // R command: take reading without updating temperature
+        response = sendCommand("R", EZO_READ_TIMEOUT_MS);
     }
 
-    // Apply anti-flashing filter
-    if (_anti_flash_enabled) {
-        result.temp_compensated = applyAntiFlash(result.temp_compensated);
+    // Parse the response
+    float ec = 0, tds = 0, sal = 0, sg = 0;
+    if (parseReadingResponse(response, ec, tds, sal, sg)) {
+        // EZO returns temperature-compensated EC when using RT command
+        result.raw_conductivity = ec;
+        result.temp_compensated = ec;
+        result.tds = tds;
+        result.salinity = sal;
+        result.specific_gravity = sg;
+        result.sensor_ok = true;
+        _ezo_ok = true;
+
+        // Apply software anti-flash filter
+        if (_anti_flash_enabled) {
+            result.temp_compensated = applyAntiFlash(result.temp_compensated);
+        }
+
+        // Apply software calibration trim
+        result.calibrated = applySoftwareCalibration(result.temp_compensated);
+    } else {
+        result.sensor_ok = false;
+        _ezo_ok = false;
+        Serial.printf("EZO read failed, response: '%s'\n", response.c_str());
     }
 
-    // Apply user calibration
-    result.calibrated = applyCalibration(result.temp_compensated);
-
-    // Store last reading
     _last_reading = result;
-
     return result;
 }
 
-uint16_t ConductivitySensor::readRawConductivity() {
-    generateExcitation();
-    delay(COND_SETTLE_TIME_MS);
-    uint16_t raw = readADCOversampled(_sense_pin, ADC_SAMPLES);
-    stopExcitation();
-    return raw;
-}
-
 float ConductivitySensor::readTemperature() {
-    uint16_t adc_temp = readADCOversampled(_temp_pin, ADC_SAMPLES);
-    float voltage = adcToVoltage(adc_temp);
-    float resistance = voltageToResistance(voltage);
-    return resistanceToTemperature(resistance);
+    float rtdNominal = (_config) ? _config->rtd_nominal : RTD_NOMINAL_RESISTANCE;
+    float rtdRef = (_config) ? _config->rtd_reference : RTD_REFERENCE_RESISTOR;
+
+    float temp = _rtd.temperature(rtdNominal, rtdRef);
+
+    // Check for RTD faults
+    uint8_t fault = _rtd.readFault();
+    if (fault) {
+        Serial.printf("MAX31865 fault: 0x%02X - ", fault);
+        if (fault & MAX31865_FAULT_HIGHTHRESH) Serial.print("RTD High Threshold ");
+        if (fault & MAX31865_FAULT_LOWTHRESH)  Serial.print("RTD Low Threshold ");
+        if (fault & MAX31865_FAULT_REFINLOW)   Serial.print("REFIN- > 0.85 x Bias ");
+        if (fault & MAX31865_FAULT_REFINHIGH)  Serial.print("REFIN- < 0.85 x Bias (FORCE- open) ");
+        if (fault & MAX31865_FAULT_RTDINLOW)   Serial.print("RTDIN- < 0.85 x Bias (FORCE- open) ");
+        if (fault & MAX31865_FAULT_OVUV)       Serial.print("Under/Over voltage ");
+        Serial.println();
+        _rtd.clearFault();
+        return -999.0f;
+    }
+
+    // Sanity check the temperature range
+    if (temp < -40.0f || temp > 250.0f) {
+        return -999.0f;
+    }
+
+    return temp;
 }
 
 conductivity_reading_t ConductivitySensor::getLastReading() {
@@ -245,98 +263,89 @@ conductivity_reading_t ConductivitySensor::getLastReading() {
 }
 
 // ============================================================================
-// SELF-TEST
+// EZO-EC CALIBRATION
 // ============================================================================
 
-bool ConductivitySensor::selfTest() {
-    // The self-test should produce approximately 1000 uS/cm
-    // This tests the electronics path, not the actual sensor
-
-    // Store current config
-    bool prev_temp_comp = _temp_comp_enabled;
-    _temp_comp_enabled = false;
-
-    // Take a reading with known excitation
-    generateExcitation();
-    delay(200);  // Longer settle time for self-test
-
-    uint16_t adc_value = readADCOversampled(_sense_pin, ADC_SAMPLES * 2);
-    float voltage = adcToVoltage(adc_value);
-    float cond = voltageToConductivity(voltage);
-
-    stopExcitation();
-
-    // Restore config
-    _temp_comp_enabled = prev_temp_comp;
-
-    // Check if reading is within expected range (1000 +/- 100 uS/cm)
-    // Note: This assumes a specific calibration resistor is connected
-    // In practice, this tests the ADC and DAC circuits
-    Serial.printf("Self-test reading: %.1f uS/cm\n", cond);
-
-    // For now, just verify we get a reasonable reading
-    return (cond > 10 && cond < 15000);
+bool ConductivitySensor::calibrateDry() {
+    String resp = sendCommand("Cal,dry", EZO_CAL_TIMEOUT_MS);
+    bool ok = isResponseOK(resp);
+    if (ok) {
+        Serial.println("EZO dry calibration complete");
+    } else {
+        Serial.printf("EZO dry calibration failed: '%s'\n", resp.c_str());
+    }
+    return ok;
 }
 
-// ============================================================================
-// CALIBRATION
-// ============================================================================
-
-void ConductivitySensor::calibrate(float reference_value) {
-    if (reference_value <= 0) return;
-
-    // Take a fresh reading
-    conductivity_reading_t reading = read();
-
-    if (!reading.sensor_ok) {
-        Serial.println("Calibration failed: sensor error");
-        return;
+bool ConductivitySensor::calibrateSingle(float value) {
+    String cmd = "Cal," + String(value, 0);
+    String resp = sendCommand(cmd, EZO_CAL_TIMEOUT_MS);
+    bool ok = isResponseOK(resp);
+    if (ok) {
+        Serial.printf("EZO single-point calibration complete (%.0f uS/cm)\n", value);
+    } else {
+        Serial.printf("EZO calibration failed: '%s'\n", resp.c_str());
     }
-
-    // Calculate calibration factor
-    float measured = reading.temp_compensated;
-    if (measured <= 0) {
-        Serial.println("Calibration failed: invalid reading");
-        return;
-    }
-
-    _calibration.slope = reference_value / measured;
-    _calibration.timestamp = millis();
-    _calibration.valid = true;
-
-    // Update config calibration percent
-    if (_config) {
-        float percent = ((_calibration.slope - 1.0) * 100.0);
-        _config->calibration_percent = (int8_t)constrain(percent, -50, 50);
-    }
-
-    Serial.printf("Calibration applied: slope=%.4f\n", _calibration.slope);
+    return ok;
 }
 
-void ConductivitySensor::setCalibrationPercent(int8_t percent) {
-    percent = constrain(percent, -50, 50);
-    _calibration.slope = 1.0 + (percent / 100.0);
-    _calibration.valid = true;
-
-    if (_config) {
-        _config->calibration_percent = percent;
+bool ConductivitySensor::calibrateLow(float value) {
+    String cmd = "Cal,low," + String(value, 0);
+    String resp = sendCommand(cmd, EZO_CAL_TIMEOUT_MS);
+    bool ok = isResponseOK(resp);
+    if (ok) {
+        Serial.printf("EZO low-point calibration complete (%.0f uS/cm)\n", value);
     }
+    return ok;
 }
 
-int8_t ConductivitySensor::getCalibrationPercent() {
-    return (int8_t)((_calibration.slope - 1.0) * 100.0);
+bool ConductivitySensor::calibrateHigh(float value) {
+    String cmd = "Cal,high," + String(value, 0);
+    String resp = sendCommand(cmd, EZO_CAL_TIMEOUT_MS);
+    bool ok = isResponseOK(resp);
+    if (ok) {
+        Serial.printf("EZO high-point calibration complete (%.0f uS/cm)\n", value);
+    }
+    return ok;
 }
 
-void ConductivitySensor::resetCalibration() {
-    _calibration.offset = 0;
-    _calibration.slope = 1.0;
-    _calibration.temp_offset = 0;
-    _calibration.timestamp = 0;
-    _calibration.valid = false;
-
-    if (_config) {
-        _config->calibration_percent = 0;
+uint8_t ConductivitySensor::getCalibrationStatus() {
+    String resp = sendCommand("Cal,?", EZO_CMD_TIMEOUT_MS);
+    // Response format: ?Cal,N where N is 0, 1, or 2
+    int idx = resp.indexOf("?Cal,");
+    if (idx >= 0) {
+        return resp.substring(idx + 5).toInt();
     }
+    return 0;
+}
+
+String ConductivitySensor::exportCalibration() {
+    String result = "";
+    String resp = sendCommand("Export", EZO_CMD_TIMEOUT_MS);
+
+    if (resp.length() == 0) return result;
+
+    // The EZO sends multiple lines of calibration data
+    // First response is the data, subsequent responses contain more lines
+    // ending with *DONE
+    result = resp;
+
+    // Read additional lines until *DONE
+    for (int i = 0; i < 20; i++) {
+        String line = readResponse(EZO_CMD_TIMEOUT_MS);
+        if (line.startsWith("*DONE") || line.length() == 0) break;
+        if (!line.startsWith("*OK")) {
+            result += "\n" + line;
+        }
+    }
+
+    return result;
+}
+
+bool ConductivitySensor::importCalibration(const String& data) {
+    String cmd = "Import," + data;
+    String resp = sendCommand(cmd, EZO_CMD_TIMEOUT_MS);
+    return isResponseOK(resp);
 }
 
 // ============================================================================
@@ -344,14 +353,22 @@ void ConductivitySensor::resetCalibration() {
 // ============================================================================
 
 void ConductivitySensor::setCellConstant(float k) {
+    k = constrain(k, 0.01f, 10.0f);
+    String cmd = "K," + String(k, 2);
+    sendCommand(cmd, EZO_CMD_TIMEOUT_MS);
+
     if (_config) {
-        _config->cell_constant = constrain(k, 0.01, 10.0);
+        _config->cell_constant = k;
     }
 }
 
-void ConductivitySensor::setTempCoefficient(float coeff) {
+void ConductivitySensor::setTDSConversionFactor(float factor) {
+    factor = constrain(factor, 0.01f, 1.0f);
+    String cmd = "TDS," + String(factor, 2);
+    sendCommand(cmd, EZO_CMD_TIMEOUT_MS);
+
     if (_config) {
-        _config->temp_comp_coefficient = constrain(coeff, 0.0, 0.05);
+        _config->ppm_conversion_factor = factor;
     }
 }
 
@@ -363,7 +380,7 @@ void ConductivitySensor::setTempCompensation(bool enable) {
 }
 
 void ConductivitySensor::setManualTemperature(float temp_c) {
-    _manual_temp = constrain(temp_c, -10.0, 250.0);
+    _manual_temp = constrain(temp_c, -10.0f, 250.0f);
     if (_config) {
         _config->manual_temperature = _manual_temp;
     }
@@ -371,7 +388,7 @@ void ConductivitySensor::setManualTemperature(float temp_c) {
 
 void ConductivitySensor::setAntiFlash(bool enable, uint8_t factor) {
     _anti_flash_enabled = enable;
-    _anti_flash_factor = constrain(factor, 1, 10);
+    _anti_flash_factor = constrain(factor, (uint8_t)1, (uint8_t)10);
 
     if (_config) {
         _config->anti_flash_enabled = enable;
@@ -379,185 +396,225 @@ void ConductivitySensor::setAntiFlash(bool enable, uint8_t factor) {
     }
 }
 
-bool ConductivitySensor::isSensorOK() {
-    return _last_reading.sensor_ok;
+void ConductivitySensor::setCalibrationPercent(int8_t percent) {
+    _calibration_percent = constrain(percent, (int8_t)-50, (int8_t)50);
+    if (_config) {
+        _config->calibration_percent = _calibration_percent;
+    }
 }
 
-bool ConductivitySensor::isTempSensorOK() {
-    return _last_reading.temp_sensor_ok;
+int8_t ConductivitySensor::getCalibrationPercent() {
+    return _calibration_percent;
+}
+
+void ConductivitySensor::setOutputParameters(bool ec, bool tds, bool sal, bool sg) {
+    sendCommand(ec  ? "O,EC,1"  : "O,EC,0",  EZO_CMD_TIMEOUT_MS);
+    sendCommand(tds ? "O,TDS,1" : "O,TDS,0", EZO_CMD_TIMEOUT_MS);
+    sendCommand(sal ? "O,S,1"   : "O,S,0",   EZO_CMD_TIMEOUT_MS);
+    sendCommand(sg  ? "O,SG,1"  : "O,SG,0",  EZO_CMD_TIMEOUT_MS);
+
+    if (_config) {
+        _config->ezo_output_ec = ec;
+        _config->ezo_output_tds = tds;
+        _config->ezo_output_sal = sal;
+        _config->ezo_output_sg = sg;
+    }
 }
 
 // ============================================================================
-// STATIC UTILITY METHODS
+// STATUS
+// ============================================================================
+
+bool ConductivitySensor::isSensorOK() {
+    return _ezo_ok;
+}
+
+bool ConductivitySensor::isTempSensorOK() {
+    return _rtd_ok;
+}
+
+String ConductivitySensor::getDeviceInfo() {
+    return sendCommand("i", EZO_CMD_TIMEOUT_MS);
+}
+
+String ConductivitySensor::getDeviceStatus() {
+    return sendCommand("Status", EZO_CMD_TIMEOUT_MS);
+}
+
+uint8_t ConductivitySensor::getRTDFault() {
+    return _rtd.readFault();
+}
+
+// ============================================================================
+// EZO CONTROL
+// ============================================================================
+
+void ConductivitySensor::sleep() {
+    sendCommand("Sleep", EZO_CMD_TIMEOUT_MS);
+    _sleeping = true;
+}
+
+void ConductivitySensor::wake() {
+    // Any command wakes the EZO from sleep
+    // Send a harmless query and discard the wake-up response
+    drainSerial();
+    _serial.print('\r');
+    delay(100);
+    drainSerial();
+
+    // Verify device is awake
+    String resp = sendCommand("i", EZO_CMD_TIMEOUT_MS);
+    if (resp.startsWith("?I")) {
+        _sleeping = false;
+    }
+}
+
+void ConductivitySensor::factoryReset() {
+    sendCommand("Factory", EZO_CMD_TIMEOUT_MS);
+    delay(EZO_BOOT_DELAY_MS);
+    drainSerial();
+    Serial.println("WARNING: EZO factory reset - all calibration cleared!");
+}
+
+void ConductivitySensor::setLED(bool on) {
+    sendCommand(on ? "L,1" : "L,0", EZO_CMD_TIMEOUT_MS);
+}
+
+void ConductivitySensor::find() {
+    sendCommand("Find", EZO_CMD_TIMEOUT_MS);
+}
+
+// ============================================================================
+// UTILITY
 // ============================================================================
 
 float ConductivitySensor::conductivityToPPM(float conductivity, float conversion_factor) {
     return conductivity * conversion_factor;
 }
 
-float ConductivitySensor::resistanceToTemperature(float resistance) {
-    // Callendar-Van Dusen equation for Pt1000
-    // Simplified linear approximation for 0-200C range:
-    // R(T) = R0 * (1 + A*T + B*T^2)
-    // Solving for T using quadratic formula (neglecting C term for T > 0)
-
-    if (resistance < 800 || resistance > 2000) {
-        // Out of range
-        return -999;
-    }
-
-    // For quick approximation: T = (R - R0) / (R0 * alpha)
-    // More accurate: use quadratic solution
-
-    float R0 = PT1000_R0;
-    float A = PT1000_A;
-    float B = PT1000_B;
-
-    // R = R0(1 + AT + BT^2)
-    // BT^2 + AT + (1 - R/R0) = 0
-    // T = (-A + sqrt(A^2 - 4B(1-R/R0))) / 2B
-
-    float ratio = resistance / R0;
-    float discriminant = A * A - 4 * B * (1 - ratio);
-
-    if (discriminant < 0) {
-        // Use linear approximation
-        return (resistance - R0) / (R0 * PT1000_ALPHA);
-    }
-
-    float temp = (-A + sqrt(discriminant)) / (2 * B);
-    return temp;
-}
-
 // ============================================================================
-// PRIVATE METHODS
+// EZO UART COMMUNICATION
 // ============================================================================
 
-void ConductivitySensor::generateExcitation() {
-    // Generate a simple DC excitation for initial testing
-    // For true AC excitation, use timer-based PWM
-    if (_excite_pin == GPIO_NUM_25) {
-        dac_output_voltage(DAC_CHANNEL_1, 200);  // ~2.6V
-    } else if (_excite_pin == GPIO_NUM_26) {
-        dac_output_voltage(DAC_CHANNEL_2, 200);
-    }
-}
+String ConductivitySensor::sendCommand(const String& command, uint16_t timeout_ms) {
+    // Drain any pending data
+    drainSerial();
 
-void ConductivitySensor::stopExcitation() {
-    if (_excite_pin == GPIO_NUM_25) {
-        dac_output_voltage(DAC_CHANNEL_1, 0);
-    } else if (_excite_pin == GPIO_NUM_26) {
-        dac_output_voltage(DAC_CHANNEL_2, 0);
-    }
-}
+    // Send command with CR terminator
+    _serial.print(command);
+    _serial.print('\r');
 
-uint16_t ConductivitySensor::readADCOversampled(uint8_t pin, uint8_t samples) {
-    uint32_t sum = 0;
-    adc1_channel_t channel;
+    // Read the data response
+    String response = readResponse(timeout_ms);
 
-    // Map GPIO to ADC channel
-    switch (pin) {
-        case GPIO_NUM_36: channel = ADC1_CHANNEL_0; break;
-        case GPIO_NUM_37: channel = ADC1_CHANNEL_1; break;
-        case GPIO_NUM_38: channel = ADC1_CHANNEL_2; break;
-        case GPIO_NUM_39: channel = ADC1_CHANNEL_3; break;
-        case GPIO_NUM_32: channel = ADC1_CHANNEL_4; break;
-        case GPIO_NUM_33: channel = ADC1_CHANNEL_5; break;
-        case GPIO_NUM_34: channel = ADC1_CHANNEL_6; break;
-        case GPIO_NUM_35: channel = ADC1_CHANNEL_7; break;
-        default: return 0;
+    // If response codes are enabled, the EZO sends *OK (or *ER) after the data.
+    // Read and check the response code, but return the data response.
+    if (response.length() > 0 && !response.startsWith("*")) {
+        // This was data; now read the *OK/*ER response code
+        String code = readResponse(timeout_ms);
+        // We don't need to use the code here; it's logged if there's an error
+        if (code.startsWith("*ER")) {
+            Serial.printf("EZO error for command '%s'\n", command.c_str());
+        }
     }
 
-    for (int i = 0; i < samples; i++) {
-        sum += adc1_get_raw(channel);
+    return response;
+}
+
+String ConductivitySensor::readResponse(uint16_t timeout_ms) {
+    String response = "";
+    uint32_t start = millis();
+
+    while ((millis() - start) < timeout_ms) {
+        if (_serial.available()) {
+            char c = _serial.read();
+            if (c == '\r') {
+                // CR terminates the response
+                response.trim();
+                return response;
+            }
+            if (c != '\n') {  // Ignore any LF characters
+                response += c;
+            }
+        }
+        yield();
     }
 
-    return sum / samples;
+    // Timeout - return whatever we have
+    response.trim();
+    return response;
 }
 
-float ConductivitySensor::adcToVoltage(uint16_t adc_value) {
-    if (adc_calibrated) {
-        return esp_adc_cal_raw_to_voltage(adc_value, &adc_chars) / 1000.0;
-    } else {
-        return (adc_value / (float)ADC_MAX_VALUE) * ADC_VREF;
-    }
+bool ConductivitySensor::isResponseOK(const String& response) {
+    return response.startsWith("*OK") || response.indexOf("*OK") >= 0;
 }
 
-float ConductivitySensor::voltageToResistance(float voltage) {
-    // Assuming voltage divider with reference resistor
-    // Vout = Vcc * R_pt1000 / (R_ref + R_pt1000)
-    // R_pt1000 = R_ref * Vout / (Vcc - Vout)
+bool ConductivitySensor::parseReadingResponse(
+    const String& response, float& ec, float& tds, float& sal, float& sg) {
 
-    if (voltage >= ADC_VREF || voltage <= 0) {
-        return 0;
-    }
+    if (response.length() == 0) return false;
 
-    float R_ref = TEMP_REF_RESISTOR;
-    float Vcc = ADC_VREF;
-    return R_ref * voltage / (Vcc - voltage);
-}
-
-float ConductivitySensor::voltageToConductivity(float voltage) {
-    // Convert voltage to conductivity based on sensor characteristics
-    // This is a simplified model - actual implementation depends on
-    // the specific signal conditioning circuit
-
-    // Assuming linear relationship:
-    // 0V = 0 uS/cm, 3.3V = 10000 uS/cm (or as configured)
-
-    float cell_k = (_config) ? _config->cell_constant : 1.0;
-    uint16_t range_max = (_config) ? _config->range_max : 10000;
-
-    // Linear interpolation
-    float conductivity = (voltage / ADC_VREF) * range_max * cell_k;
-
-    return conductivity;
-}
-
-float ConductivitySensor::applyTempCompensation(float conductivity, float temperature) {
-    // Standard temperature compensation formula:
-    // Cond_25C = Cond_T / (1 + alpha * (T - 25))
-
-    float alpha = (_config) ? _config->temp_comp_coefficient : 0.02;
-    float ref_temp = TEMP_REF_CELSIUS;
-
-    float compensation_factor = 1.0 + alpha * (temperature - ref_temp);
-
-    if (compensation_factor <= 0.1) {
-        // Prevent division by very small numbers
-        compensation_factor = 0.1;
+    // The first character must be a digit for a valid reading
+    if (!isdigit(response.charAt(0))) {
+        return false;
     }
 
-    return conductivity / compensation_factor;
-}
+    // EZO outputs enabled parameters in fixed order: EC, TDS, SAL, SG
+    // Disabled parameters are omitted from the comma-separated output.
+    char buf[64];
+    response.toCharArray(buf, sizeof(buf));
 
-float ConductivitySensor::applyCalibration(float conductivity) {
-    // Apply user calibration
-    return (conductivity + _calibration.offset) * _calibration.slope;
+    // Build ordered list of which outputs are enabled
+    bool enabled[] = {
+        (_config) ? _config->ezo_output_ec  : true,
+        (_config) ? _config->ezo_output_tds : true,
+        (_config) ? _config->ezo_output_sal : false,
+        (_config) ? _config->ezo_output_sg  : false
+    };
+    float* targets[] = { &ec, &tds, &sal, &sg };
+
+    // Parse tokens and assign to enabled outputs in order
+    char* token = strtok(buf, ",");
+    int enabledIdx = 0;
+
+    while (token != NULL && enabledIdx < 4) {
+        // Find the next enabled output
+        while (enabledIdx < 4 && !enabled[enabledIdx]) {
+            enabledIdx++;
+        }
+        if (enabledIdx < 4) {
+            *targets[enabledIdx] = atof(token);
+            enabledIdx++;
+        }
+        token = strtok(NULL, ",");
+    }
+
+    // Valid if EC is enabled and we got a non-negative value
+    return (enabled[0] && ec >= 0);
 }
 
 float ConductivitySensor::applyAntiFlash(float conductivity) {
     // Low-pass filter to reduce steam flash noise
     // Using exponential moving average
-
     if (_anti_flash_buffer == 0) {
         _anti_flash_buffer = conductivity;
         return conductivity;
     }
 
-    // Factor determines smoothing: higher = more smoothing
-    float alpha = 1.0 / _anti_flash_factor;
-    _anti_flash_buffer = alpha * conductivity + (1.0 - alpha) * _anti_flash_buffer;
+    float alpha = 1.0f / _anti_flash_factor;
+    _anti_flash_buffer = alpha * conductivity + (1.0f - alpha) * _anti_flash_buffer;
 
     return _anti_flash_buffer;
 }
 
-bool ConductivitySensor::checkSensorRange(float conductivity) {
-    uint16_t range_max = (_config) ? _config->range_max : 10000;
-    return (conductivity >= 0 && conductivity <= range_max * 1.5);
+float ConductivitySensor::applySoftwareCalibration(float conductivity) {
+    // Apply software trim percentage on top of EZO hardware calibration
+    float factor = 1.0f + (_calibration_percent / 100.0f);
+    return conductivity * factor;
 }
 
-bool ConductivitySensor::checkTempRange(float temperature) {
-    // Valid temperature range for Pt1000 sensor
-    return (temperature >= -40 && temperature <= 250);
+void ConductivitySensor::drainSerial() {
+    while (_serial.available()) {
+        _serial.read();
+    }
 }

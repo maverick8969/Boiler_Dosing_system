@@ -8,7 +8,8 @@
  *
  * Hardware:
  * - 3x Nema17 Stepper Motors with A4988 Drivers (Chemical Pumps)
- * - Sensorex CS675HTTC-P1K/K=1.0 Conductivity Sensor
+ * - Sensorex CS675HTTC/P1K Conductivity Probe via Atlas Scientific EZO-EC (UART)
+ * - PT1000 RTD Temperature Sensor via Adafruit MAX31865 (SPI)
  * - Water Meter Input (1 pulse per gallon)
  * - 20x4 I2C LCD Display
  * - WS2812 RGB LED Status Indicators
@@ -34,8 +35,12 @@
 // GLOBAL INSTANCES
 // ============================================================================
 
-// Conductivity sensor
-ConductivitySensor conductivitySensor(COND_EXCITE_PIN, COND_SENSE_PIN, TEMP_SENSE_PIN);
+// Conductivity sensor (Atlas Scientific EZO-EC via UART + Adafruit MAX31865 PT1000 RTD via SPI)
+ConductivitySensor conductivitySensor(
+    Serial2,
+    EZO_EC_RX_PIN, EZO_EC_TX_PIN,
+    MAX31865_CS_PIN, MAX31865_MOSI_PIN, MAX31865_MISO_PIN, MAX31865_SCK_PIN
+);
 
 // System configuration (stored in NVS)
 system_config_t systemConfig;
@@ -151,7 +156,7 @@ void setup() {
 
     // Initialize auxiliary inputs
     pinMode(AUX_INPUT1_PIN, INPUT_PULLUP);
-    pinMode(AUX_INPUT2_PIN, INPUT_PULLUP);
+    // Note: AUX_INPUT2 (GPIO18) repurposed for MAX31865 SCK
 
     // Initialize buttons
     pinMode(BTN_UP_PIN, INPUT_PULLUP);
@@ -401,6 +406,10 @@ void initializeDefaults() {
     systemConfig.conductivity.units = COND_DEFAULT_UNITS;
     systemConfig.conductivity.temp_comp_enabled = COND_DEFAULT_TEMP_COMP;
     systemConfig.conductivity.temp_comp_coefficient = COND_DEFAULT_TEMP_COEFF;
+    systemConfig.conductivity.ezo_output_ec = COND_DEFAULT_EZO_OUTPUT_EC;
+    systemConfig.conductivity.ezo_output_tds = COND_DEFAULT_EZO_OUTPUT_TDS;
+    systemConfig.conductivity.ezo_output_sal = COND_DEFAULT_EZO_OUTPUT_SAL;
+    systemConfig.conductivity.ezo_output_sg = COND_DEFAULT_EZO_OUTPUT_SG;
     systemConfig.conductivity.sample_mode = COND_DEFAULT_SAMPLE_MODE;
     systemConfig.conductivity.interval_seconds = COND_DEFAULT_INTERVAL;
     systemConfig.conductivity.duration_seconds = COND_DEFAULT_DURATION;
@@ -408,6 +417,9 @@ void initializeDefaults() {
     systemConfig.conductivity.blow_time_seconds = COND_DEFAULT_BLOW_TIME;
     systemConfig.conductivity.prop_band = COND_DEFAULT_PROP_BAND;
     systemConfig.conductivity.max_prop_time_seconds = COND_DEFAULT_MAX_PROP_TIME;
+    systemConfig.conductivity.rtd_nominal = COND_DEFAULT_RTD_NOMINAL;
+    systemConfig.conductivity.rtd_reference = COND_DEFAULT_RTD_REFERENCE;
+    systemConfig.conductivity.rtd_wires = COND_DEFAULT_RTD_WIRES;
 
     // Blowdown defaults
     systemConfig.blowdown.setpoint = BLOW_DEFAULT_SETPOINT;
@@ -516,12 +528,9 @@ void checkAlarms() {
         new_alarms |= ALARM_TEMP_ERROR;
     }
 
-    // Drum level switches
+    // Drum level switch (AUX_INPUT2 repurposed for MAX31865 SCK)
     if (digitalRead(AUX_INPUT1_PIN) == LOW) {
         new_alarms |= ALARM_DRUM_LEVEL_1;
-    }
-    if (digitalRead(AUX_INPUT2_PIN) == LOW) {
-        new_alarms |= ALARM_DRUM_LEVEL_2;
     }
 
     // Check for new alarms
