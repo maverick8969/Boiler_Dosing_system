@@ -179,16 +179,14 @@ For binary operation, the firmware only needs to distinguish three conditions:
 
 ### Feedback Reading Circuit
 
-The 4-20mA feedback signal is converted to a voltage using a precision sense resistor, then read by an ESP32 ADC input. A 250 Ω resistor converts 4-20mA to 1-5V, which is within the ESP32's 0-3.3V ADC range when scaled with a voltage divider.
+The 4-20mA feedback signal is converted to a voltage using a precision sense resistor, then read by the **ADS1115 external 16-bit ADC** on the shared I2C bus. A 150 Ω sense resistor converts 4-20mA to 0.6–3.0V.
 
-**Option A — 150 Ω sense resistor (direct read, no divider):**
+> **Why ADS1115?** All ESP32 ADC1 input-only pins (GPIO34–39) are already occupied (water meter, flow switch, EZO-EC RX, MAX31865 MISO). The ADS1115 provides 16-bit resolution with no additional GPIO — it shares the existing I2C bus (GPIO21 SDA / GPIO22 SCL) at address `0x48`.
 
 ```
 4 mA × 150 Ω = 0.60V
 20 mA × 150 Ω = 3.00V
 ```
-
-This maps the full 4-20mA range to 0.6–3.0V, safely within the ESP32's 0–3.3V ADC range with no divider needed.
 
 ```
     Actuator Feedback OUTPUT (+)
@@ -196,7 +194,7 @@ This maps the full 4-20mA range to 0.6–3.0V, safely within the ESP32's 0–3.3
           │
         R_sense (150 Ω, 1%, 0.25W)
           │
-          ●──────────── ADC Input (ESP32 GPIO)
+          ●──────────── ADS1115 Channel 0 (A0)
           │
         C_filt (0.1 µF)
           │
@@ -210,14 +208,11 @@ This maps the full 4-20mA range to 0.6–3.0V, safely within the ESP32's 0–3.3
 | R_sense | Resistor | 150 Ω, 1%, 0.25W metal film | Converts 4-20mA to 0.6-3.0V |
 | C_filt | Capacitor | 0.1 µF ceramic | Filters noise on ADC input |
 | (optional) TVS | TVS diode | 3.3V unidirectional | Protects ADC from transients |
+| U_adc | ADS1115 | I2C addr 0x48 | 16-bit external ADC (shared I2C bus) |
 
-### ADC Pin Selection
+### ADC Configuration
 
-Use one of the ESP32's ADC1 channel pins (GPIOs 32-39) for reliable readings. ADC2 channels conflict with WiFi and should be avoided.
-
-Recommended: **GPIO34** or **GPIO36** (input-only pins, no boot conflicts). If GPIO34 is occupied by the water meter, use a free ADC1 pin.
-
-> **Note:** The ESP32's built-in ADC has 12-bit resolution but is non-linear. For binary open/closed detection with wide thresholds, this is adequate. If higher accuracy is needed in the future, the ADS1115 external ADC (already defined in `pin_definitions.h`) can be used instead.
+The ADS1115 is on the same I2C bus as the LCD display (GPIO21 SDA, GPIO22 SCL, 400 kHz). Channel 0 is dedicated to the blowdown valve feedback. The `blowdown.h` / `blowdown.cpp` firmware reads this channel via `ads1115ReadChannel(0)` inside the `readFeedback()` method.
 
 ---
 
@@ -245,7 +240,7 @@ K1 COMMON   ──→ Actuator DPS Input (+)  [DIN connector, terminal 2]
 ### Position Feedback (Actuator → ESP32)
 
 ```
-Actuator DPS Output (+) [terminal E2] ──→ R_sense (150 Ω) ──→ ESP32 ADC pin
+Actuator DPS Output (+) [terminal E2] ──→ R_sense (150 Ω) ──→ ADS1115 CH0
 Actuator DPS Output (−)               ──→ 24V GND / ESP32 GND (shared)
 ```
 
@@ -276,26 +271,25 @@ The existing `BlowdownController` class (`blowdown.h` / `blowdown.cpp`) drives G
 
 Because the relay-switched resistor circuit translates GPIO4 HIGH/LOW into 20mA/4mA respectively, **the existing firmware open/close logic works as-is**. The `setRelayState()` method in `blowdown.cpp` already writes HIGH or LOW to GPIO4, which is exactly what this circuit needs.
 
-### Firmware Addition: Position Feedback (Optional Enhancement)
+### Firmware Integration: Position Feedback
 
-To read the position feedback, a new ADC reading can be added to the `update()` loop:
+The `BlowdownController` class (`blowdown.h` / `blowdown.cpp`) reads position feedback via the ADS1115 external ADC on each `update()` call:
 
 ```cpp
-// Read 4-20mA feedback via 150Ω sense resistor
-// 0.6V = closed (4mA), 3.0V = open (20mA)
-int raw_adc = analogRead(FEEDBACK_ADC_PIN);
-float voltage = raw_adc * (3.3 / 4095.0);
-float current_mA = voltage / 0.150;  // V / R_sense = I
+// Read 4-20mA feedback via ADS1115 channel 0 + 150Ω sense resistor
+int16_t raw_adc = ads1115ReadChannel(BLOWDOWN_FEEDBACK_ADS_CH);
+float voltage = raw_adc * 0.000125;  // ADS1115 at ±4.096V gain: 125µV/bit
+float current_mA = (voltage / BLOWDOWN_FEEDBACK_R_SENSE) * 1000.0;
 
-bool confirmed_open  = (current_mA > 19.0);
-bool confirmed_closed = (current_mA < 5.0);
-bool in_transit = !confirmed_open && !confirmed_closed;
+bool confirmed_open  = (current_mA > BLOWDOWN_MA_OPEN_MIN);      // > 19 mA
+bool confirmed_closed = (current_mA < BLOWDOWN_MA_CLOSED_MAX);   // < 5 mA
+bool valve_fault = (current_mA < BLOWDOWN_MA_FAULT_LOW);         // < 3 mA (wiring fault)
 ```
 
-This feedback can be used to:
-- Verify the valve reached the commanded position after the ball valve delay period
+This feedback is used to:
+- Confirm the valve reached the commanded position (replaces time-based delay)
 - Detect a stuck valve (commanded open but feedback still reads closed)
-- Replace the time-based `ball_valve_delay` with actual position confirmation
+- Trigger a `VALVE FAULT` alarm if feedback current drops below 3 mA (wiring fault)
 
 ---
 

@@ -70,7 +70,7 @@ This SOP applies to all personnel responsible for:
 
 ### Controller Entry
 - [ ] Smartphone/tablet with web browser, OR
-- [ ] Access to LCD menu buttons
+- [ ] Access to LCD + rotary encoder
 
 ---
 
@@ -247,17 +247,16 @@ Example: 15 drops × 20 = 300 ppm ✓
 
 **Time Required:** 3-5 minutes
 
-| Step | Button | Action |
-|------|--------|--------|
-| 1 | Press **MENU** | Enter main menu |
-| 2 | Press **▼** twice | Navigate to "Manual Test Input" |
-| 3 | Press **ENTER** | Open test input menu |
-| 4 | Press **ENTER** on "TDS" | Edit TDS value |
-| 5 | Use **▲/▼** to adjust | Or hold for fast scroll |
-| 6 | Press **ENTER** | Confirm value |
-| 7 | Repeat for Alkalinity, Sulfite, pH | Same process |
-| 8 | Press **MENU** | Return to main screen |
-| 9 | Verify readings updated | Check fuzzy output display |
+| Step | Action | Encoder Input |
+|------|--------|---------------|
+| 1 | Enter main menu | **Long press** encoder button |
+| 2 | Navigate to "Manual Test Input" | **Rotate** to highlight, **short press** to select |
+| 3 | Select "TDS" | **Short press** to edit |
+| 4 | Adjust TDS value | **Rotate CW** to increase, **CCW** to decrease |
+| 5 | Confirm value | **Short press** |
+| 6 | Repeat for Alkalinity, Sulfite, pH | Same rotate + press process |
+| 7 | Return to main screen | **Long press** to exit menu |
+| 8 | Verify readings updated | Check fuzzy output display |
 
 ### 9.3 Method C: API (Automated Systems)
 
@@ -295,7 +294,7 @@ After entering test data, observe the control recommendations:
 
 ### 10.2 Blowdown Decision Process
 
-**Remember: Blowdown is MANUAL - you control the valve!**
+**Note: Blowdown is automated via the Assured Automation E26NRXS4UV-EP420C motorized ball valve. The controller opens/closes the valve based on conductivity setpoint. Use HOA to override.**
 
 ```
 ┌─────────────────────────────────────────┐
@@ -352,7 +351,7 @@ After entering test data, observe the control recommendations:
 |------|--------|
 | 1 | Note alarm type and time |
 | 2 | Take immediate action per matrix |
-| 3 | Press **ENTER** to acknowledge (if required) |
+| 3 | **Short press** encoder to acknowledge (if required) |
 | 4 | Record alarm and action in log |
 | 5 | Verify alarm clears after correction |
 | 6 | Report recurring alarms to supervisor |

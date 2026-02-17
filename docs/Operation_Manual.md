@@ -35,7 +35,7 @@ The Boiler Dosing Controller is an ESP32-based system that manages chemical trea
 | **Manual Test Input** | Enter lab test results via web or LCD |
 | **Three Chemical Pumps** | H₂SO₃ (acid), NaOH (caustic), Amine/Sulfite |
 | **Water Metering** | 1 pulse/gallon makeup water tracking |
-| **Blowdown Recommendation** | TDS-based blowdown guidance (manual valve) |
+| **Automated Blowdown** | TDS-based blowdown with motorized ball valve |
 | **Remote Monitoring** | WiFi connectivity with TimescaleDB/Grafana |
 | **Multiple Feed Modes** | A through F plus scheduled dosing |
 
@@ -66,13 +66,9 @@ Conductivity Sensor:    Sensorex CS675HTTC
 │  │  Line 4: Water Total / Flow Rate                  │  │
 │  └──────────────────────────────────────────────────┘  │
 │                                                         │
-│     [▲]  [▼]  [ENTER]  [MENU]     ● ● ● Status LEDs   │
-│      UP  DOWN                      R G B              │
+│     [ENCODER]                      ● ● ● Status LEDs   │
+│      Rotate + Press                (WS2812 strip)      │
 │                                                         │
-│  ┌─────┐  ┌─────┐  ┌─────┐                             │
-│  │PUMP1│  │PUMP2│  │PUMP3│    HOA Switches (optional)  │
-│  │H2SO3│  │NaOH │  │Amine│                             │
-│  └─────┘  └─────┘  └─────┘                             │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -96,9 +92,8 @@ Conductivity Sensor:    Sensorex CS675HTTC
 | **TEMP PROBE** | Pt1000 RTD (2 or 3 wire) |
 | **WATER METER** | Pulse input (dry contact) |
 | **PUMP 1-3** | Stepper motor outputs (4-pin each) |
-| **BLOWDOWN** | Relay output for valve (dry contact) |
-| **ALARM** | Relay output for external alarm |
-| **AUX IN 1-2** | Auxiliary inputs (drum level, etc.) |
+| **BLOWDOWN** | 4-20mA valve control (Assured Automation E26NRXS4UV-EP420C) |
+| **AUX IN 1** | Auxiliary input (drum level switch) |
 
 ---
 
@@ -125,7 +120,7 @@ Each pump and the blowdown controller have independent HOA control:
 | **D** | Water Contact | Pump triggered by water meter pulses |
 | **E** | Paddlewheel | Pump triggered by flow volume |
 | **F** | Fuzzy Logic | **Recommended** - Intelligent dosing based on chemistry |
-| **S** | Scheduled | Time-of-day based feeding |
+| **S** | Scheduled | Time-of-day based feeding *(not yet implemented in firmware)* |
 
 ### Feed Mode F (Fuzzy Logic) - Recommended
 
@@ -156,14 +151,16 @@ Dose (ml) = Water Volume (gal) × ml_per_gallon_at_100% × (Fuzzy Rate / 100%)
 └────────────────────────────────┘
 ```
 
-### Button Functions
+### Rotary Encoder Functions
 
-| Button | Short Press | Long Press (3s) |
-|--------|-------------|-----------------|
-| **▲ UP** | Previous screen | Increase value (in menu) |
-| **▼ DOWN** | Next screen | Decrease value (in menu) |
-| **ENTER** | Select/Confirm | Access quick actions |
-| **MENU** | Enter/Exit menu | Reset to main screen |
+The KY-040 rotary encoder is the sole physical input device.
+
+| Action | Function |
+|--------|----------|
+| **Rotate CW** | Next screen / Increase value |
+| **Rotate CCW** | Previous screen / Decrease value |
+| **Short Press** (< 500 ms) | Select / Confirm |
+| **Long Press** (> 1.5 s) | Enter / Exit menu |
 
 ### Menu Structure
 
@@ -282,26 +279,19 @@ Each pump has configurable parameters:
 
 ## Blowdown Control
 
-### IMPORTANT: Manual Valve Control
+### Automated Blowdown Valve
 
-**The blowdown valve is controlled MANUALLY by the operator.**
+The blowdown valve is an **Assured Automation E26NRXS4UV-EP420C** motorized 1" SS ball valve controlled automatically by the firmware. The controller drives the valve via a 4-20mA signal (relay-switched resistor circuit on GPIO4) and reads position feedback through an ADS1115 external ADC.
 
-The controller provides a **RECOMMENDATION** only (0-100%) based on TDS/conductivity readings. The operator must:
+**Operating modes** (selectable in the Blowdown menu or via HOA):
 
-1. Observe the blowdown recommendation on the display or web UI
-2. Verify boiler water level is adequate
-3. Open the blowdown valve manually
-4. Monitor the blowdown process
-5. Close the valve when complete
+| Mode | Description |
+|------|-------------|
+| **AUTO** | Opens/closes based on conductivity setpoint, deadband, and sample mode |
+| **HAND** | Forces valve open (10-minute safety timeout) |
+| **OFF** | Forces valve closed |
 
-### Blowdown Recommendation Levels
-
-| Recommendation | Meaning | Suggested Action |
-|----------------|---------|------------------|
-| 0-20% | Low/Normal | No blowdown needed |
-| 21-50% | Moderate | Brief blowdown (30-60 sec) |
-| 51-75% | High | Extended blowdown (1-2 min) |
-| 76-100% | Very High | Maximum blowdown, check for issues |
+In AUTO mode the controller compares the measured conductivity against the setpoint and deadband. When conductivity exceeds the setpoint, the valve opens. When it falls below (setpoint - deadband), the valve closes. Position feedback confirms actual valve state.
 
 ### Setpoint Configuration
 
@@ -424,7 +414,7 @@ The controller provides a **RECOMMENDATION** only (0-100%) based on TDS/conducti
 
 The controller includes these safety features:
 
-1. **Manual Blowdown** - Operator must control valve manually
+1. **Automated Blowdown** - Valve controlled by setpoint; fail-closed on signal loss
 2. **HAND Mode Timeout** - 10-minute limit on forced operation
 3. **Feed Time Limit** - Prevents pump runaway
 4. **Chemical Lockout** - Post-blowdown delay prevents waste
@@ -434,8 +424,8 @@ The controller includes these safety features:
 ### Emergency Procedures
 
 **Controller Failure:**
-1. Set all HOA switches to OFF
-2. Manually control blowdown as needed
+1. Set all HOA modes to OFF via LCD menu or web UI
+2. Valve will fail-closed automatically on controller power loss
 3. Contact service technician
 
 **Chemical Spill:**
@@ -476,7 +466,7 @@ The controller includes these safety features:
 | Temperature Input | Pt1000 RTD, -50°C to +200°C |
 | Water Meter Input | Dry contact, max 50 Hz |
 | Stepper Outputs | 3x 2A per phase |
-| Relay Outputs | 2x 5A @ 250VAC |
+| Blowdown Valve | 4-20mA command + feedback (via relay + ADS1115) |
 
 ---
 
@@ -494,4 +484,4 @@ The controller includes these safety features:
 ---
 
 *Document Revision: 1.0*
-*Last Updated: December 2024*
+*Last Updated: February 2026*
