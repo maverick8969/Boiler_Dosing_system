@@ -50,6 +50,15 @@ typedef struct {
     uint32_t fw_pump_cycle_count;       // Cumulative feedwater pump cycles
     uint32_t fw_pump_on_time_sec;       // Cumulative feedwater pump on-time (sec)
     uint16_t active_alarms;
+
+    // Health & diagnostics (added for DeviceManager/SensorHealth integration)
+    uint8_t safe_mode;              // 0=NONE, 1=SENSOR_FAIL, 2=STALE_DATA, etc.
+    bool cond_sensor_valid;         // Conductivity reading is trustworthy
+    bool temp_sensor_valid;         // Temperature reading is trustworthy
+    uint8_t devices_operational;    // Count of operational devices
+    uint8_t devices_faulted;        // Count of faulted devices
+    uint16_t devices_faulted_mask;  // Bitmask of faulted device IDs
+    uint32_t measurement_age_ms;    // Age of last measurement cycle (ms)
 } sensor_reading_t;
 
 // ============================================================================

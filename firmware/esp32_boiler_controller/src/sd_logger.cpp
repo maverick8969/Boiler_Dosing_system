@@ -106,9 +106,10 @@ bool SDLogger::logReading(const sensor_reading_t* reading) {
     }
 
     // Format CSV row
-    char line[256];
+    char line[384];
     snprintf(line, sizeof(line),
-        "%lu,%.1f,%.1f,%lu,%lu,%.2f,%d,%.1f,%d,%d,%d,%d,%lu,%lu,0x%04X",
+        "%lu,%.1f,%.1f,%lu,%lu,%.2f,%d,%.1f,%d,%d,%d,%d,%lu,%lu,0x%04X,"
+        "%u,%d,%d,%u,%u,0x%04X,%lu",
         reading->timestamp,
         reading->conductivity,
         reading->temperature,
@@ -123,7 +124,14 @@ bool SDLogger::logReading(const sensor_reading_t* reading) {
         reading->feedwater_pump_on ? 1 : 0,
         reading->fw_pump_cycle_count,
         reading->fw_pump_on_time_sec,
-        reading->active_alarms
+        reading->active_alarms,
+        reading->safe_mode,
+        reading->cond_sensor_valid ? 1 : 0,
+        reading->temp_sensor_valid ? 1 : 0,
+        reading->devices_operational,
+        reading->devices_faulted,
+        reading->devices_faulted_mask,
+        reading->measurement_age_ms
     );
 
     bool ok = writeCSVRow(line);

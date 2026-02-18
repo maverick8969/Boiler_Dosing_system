@@ -39,7 +39,9 @@ struct sensor_reading_t;
 #define SD_FLUSH_INTERVAL_MS    30000   // Flush file every 30 seconds
 #define SD_CSV_HEADER           "timestamp,conductivity,temperature,wm1_gal,wm2_gal," \
                                 "flow_gpm,blowdown,valve_mA,pump1,pump2,pump3," \
-                                "fw_pump,fw_cycles,fw_ontime_s,alarms"
+                                "fw_pump,fw_cycles,fw_ontime_s,alarms," \
+                                "safe_mode,cond_valid,temp_valid," \
+                                "dev_operational,dev_faulted,dev_faulted_mask,meas_age_ms"
 
 // ============================================================================
 // SD LOGGER CLASS

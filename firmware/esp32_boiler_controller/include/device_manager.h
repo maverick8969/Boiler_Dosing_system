@@ -163,6 +163,9 @@ public:
     /** Get the enabled_devices bitmask for NVS storage */
     uint16_t getEnabledMask();
 
+    /** Get bitmask of currently faulted devices */
+    uint16_t getFaultedMask();
+
     /** Count of operational devices */
     uint8_t countOperational();
 

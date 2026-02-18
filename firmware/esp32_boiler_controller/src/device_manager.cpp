@@ -289,6 +289,14 @@ uint16_t DeviceManager::getEnabledMask() {
     return mask;
 }
 
+uint16_t DeviceManager::getFaultedMask() {
+    uint16_t mask = 0;
+    for (int i = 0; i < DEV_COUNT; i++) {
+        if (isFaulted((device_id_t)i)) mask |= (1 << i);
+    }
+    return mask;
+}
+
 uint8_t DeviceManager::countOperational() {
     uint8_t count = 0;
     for (int i = 0; i < DEV_COUNT; i++) {

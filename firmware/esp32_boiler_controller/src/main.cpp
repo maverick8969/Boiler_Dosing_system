@@ -801,6 +801,15 @@ void logSensorData() {
     reading.fw_pump_on_time_sec = systemState.fw_pump_on_time_sec;
     reading.active_alarms = systemState.active_alarms;
 
+    // Health & diagnostics
+    reading.safe_mode = (uint8_t)sensorHealth.getSafeMode();
+    reading.cond_sensor_valid = sensorHealth.isConductivityValid();
+    reading.temp_sensor_valid = sensorHealth.isTemperatureValid();
+    reading.devices_operational = deviceManager.countOperational();
+    reading.devices_faulted = deviceManager.countFaulted();
+    reading.devices_faulted_mask = deviceManager.getFaultedMask();
+    reading.measurement_age_ms = sensorHealth.getMeasurementAge();
+
     // Log to TimescaleDB (via WiFi) and/or RAM buffer
     dataLogger.logReading(&reading);
 

@@ -4,6 +4,9 @@
  */
 
 #include "web_server.h"
+#include "device_manager.h"
+#include "sensor_health.h"
+#include "self_test.h"
 #include <WiFi.h>
 
 // Global instance
@@ -39,6 +42,7 @@ bool BoilerWebServer::begin(system_config_t* config, FuzzyController* fuzzy) {
     _server.on("/", HTTP_GET, [this]() { handleRoot(); });
     _server.on("/api/status", HTTP_GET, [this]() { handleGetStatus(); });
     _server.on("/api/fuzzy", HTTP_GET, [this]() { handleGetFuzzy(); });
+    _server.on("/api/devices", HTTP_GET, [this]() { handleGetDevices(); });
     _server.on("/api/tests", HTTP_GET, [this]() { handleGetTests(); });
     _server.on("/api/tests", HTTP_POST, [this]() { handlePostTest(); });
     _server.on("/api/tests", HTTP_DELETE, [this]() { handleClearTests(); });
@@ -110,6 +114,44 @@ void BoilerWebServer::handleGetStatus() {
     doc["uptime"] = millis() / 1000;
     doc["free_heap"] = ESP.getFreeHeap();
 
+    // Health & diagnostics
+    JsonObject health = doc["health"].to<JsonObject>();
+    health["safe_mode"] = sensorHealth.getSafeModeString();
+    health["safe_mode_code"] = (uint8_t)sensorHealth.getSafeMode();
+    health["in_safe_mode"] = sensorHealth.isInSafeMode();
+    health["cond_valid"] = sensorHealth.isConductivityValid();
+    health["temp_valid"] = sensorHealth.isTemperatureValid();
+    health["feedback_valid"] = sensorHealth.isFeedbackValid();
+    health["measurement_fresh"] = sensorHealth.isMeasurementFresh();
+    health["measurement_age_ms"] = sensorHealth.getMeasurementAge();
+    health["devices_operational"] = deviceManager.countOperational();
+    health["devices_faulted"] = deviceManager.countFaulted();
+
+    // Sensor health details
+    const sensor_health_t* cond = sensorHealth.getConductivityHealth();
+    const sensor_health_t* temp = sensorHealth.getTemperatureHealth();
+    JsonObject cond_h = health["conductivity"].to<JsonObject>();
+    cond_h["consecutive_failures"] = cond->consecutive_failures;
+    cond_h["total_failures"] = cond->total_failures;
+    cond_h["faulted"] = cond->faulted;
+    cond_h["stale"] = cond->stale;
+
+    JsonObject temp_h = health["temperature"].to<JsonObject>();
+    temp_h["consecutive_failures"] = temp->consecutive_failures;
+    temp_h["total_failures"] = temp->total_failures;
+    temp_h["faulted"] = temp->faulted;
+    temp_h["stale"] = temp->stale;
+
+    // POST results
+    self_test_result_t post = selfTest.getLastResult();
+    JsonObject post_obj = doc["post"].to<JsonObject>();
+    post_obj["total_tested"] = post.total_tested;
+    post_obj["total_passed"] = post.total_passed;
+    post_obj["total_failed"] = post.total_failed;
+    post_obj["total_skipped"] = post.total_skipped;
+    post_obj["critical_failure"] = post.critical_failure;
+    post_obj["reset_reason"] = post.reset_reason ? post.reset_reason : "UNKNOWN";
+
     // Manual test values
     JsonObject tests = doc["manual_tests"].to<JsonObject>();
     tests["tds"]["value"] = _manual_tests[0].value;
@@ -174,6 +216,45 @@ void BoilerWebServer::handleGetFuzzy() {
         setpoints["alkalinity"] = _config->fuzzy.alk_setpoint;
         setpoints["sulfite"] = _config->fuzzy.sulfite_setpoint;
         setpoints["ph"] = _config->fuzzy.ph_setpoint;
+    }
+
+    String response;
+    serializeJson(doc, response);
+    _server.send(200, "application/json", response);
+}
+
+void BoilerWebServer::handleGetDevices() {
+    sendCORSHeaders();
+
+    JsonDocument doc;
+
+    doc["count"] = DEV_COUNT;
+    doc["operational"] = deviceManager.countOperational();
+    doc["faulted"] = deviceManager.countFaulted();
+    doc["enabled_mask"] = deviceManager.getEnabledMask();
+
+    JsonArray devices = doc["devices"].to<JsonArray>();
+    for (int i = 0; i < DEV_COUNT; i++) {
+        device_id_t id = (device_id_t)i;
+        const device_info_t* info = deviceManager.getDeviceInfo(id);
+        if (!info) continue;
+
+        JsonObject dev = devices.add<JsonObject>();
+        dev["id"] = i;
+        dev["name"] = info->name;
+        dev["state"] = deviceManager.getStateString(id);
+        dev["enabled"] = info->enabled;
+        dev["required"] = info->required;
+        dev["installed"] = info->installed;
+        dev["healthy"] = info->healthy;
+        dev["fault_count"] = info->fault_count;
+        dev["total_faults"] = info->total_faults;
+        if (info->last_ok_time > 0) {
+            dev["last_ok_age_ms"] = millis() - info->last_ok_time;
+        }
+        if (info->last_fault_time > 0) {
+            dev["last_fault_age_ms"] = millis() - info->last_fault_time;
+        }
     }
 
     String response;
