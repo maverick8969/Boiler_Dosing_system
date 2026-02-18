@@ -426,6 +426,10 @@ typedef struct {
     int8_t timezone_offset;         // Hours from UTC
     bool dst_enabled;               // Daylight saving time
 
+    // Hardware device enable/disable flags (managed by DeviceManager)
+    uint16_t enabled_devices;       // Bitmask: bit N = device N enabled
+    uint16_t _hw_reserved;          // Alignment padding / future use
+
 } system_config_t;
 
 #define CONFIG_MAGIC                0x43543630  // "CT60" in hex
@@ -512,6 +516,8 @@ typedef struct {
 #define ALARM_WIFI_DISCONNECT       0x0800
 #define ALARM_CALIBRATION_DUE       0x1000
 #define ALARM_VALVE_FAULT           0x2000
+#define ALARM_STALE_DATA            0x4000
+#define ALARM_SAFE_MODE             0x8000
 
 // ============================================================================
 // NVS STORAGE KEYS

@@ -67,15 +67,11 @@ typedef struct {
 } device_info_t;
 
 // ============================================================================
-// HARDWARE CONFIG (stored in NVS as part of system_config_t)
+// HARDWARE CONFIG DEFAULTS
 // ============================================================================
 
-typedef struct {
-    uint16_t enabled_devices;      // Bitmask: bit N = device N enabled by user
-} hardware_config_t;
-
-// Default: all devices enabled
-#define HW_CONFIG_DEFAULT_ENABLED   0x3FFF  // bits 0-13 set
+// Default: all devices enabled (bits 0-13 set)
+#define HW_CONFIG_DEFAULT_ENABLED   0x3FFF
 
 // ============================================================================
 // FAULT THRESHOLDS
@@ -83,7 +79,6 @@ typedef struct {
 
 #define FAULT_CONSECUTIVE_THRESHOLD  3     // Faults before declaring device faulted
 #define FAULT_RECOVERY_THRESHOLD     3     // Good reads before clearing fault
-#define STALE_READING_MS             5000  // Max age before reading is stale
 
 // ============================================================================
 // DEVICE MANAGER CLASS
@@ -94,10 +89,10 @@ public:
     DeviceManager();
 
     /**
-     * Initialize the device manager with stored configuration.
-     * Call after loadConfiguration() so enabled_devices is populated.
+     * Initialize the device manager with a pointer to the enabled_devices
+     * bitmask inside system_config_t. Call after loadConfiguration().
      */
-    void begin(hardware_config_t* config);
+    void begin(uint16_t* enabled_devices_ptr);
 
     // --- Enable / Disable ---
 
@@ -179,7 +174,7 @@ public:
 
 private:
     device_info_t       _devices[DEV_COUNT];
-    hardware_config_t*  _config;
+    uint16_t*           _enabled_ptr;   // Points to systemConfig.enabled_devices
 
     void updateState(device_id_t id);
     void initDevice(device_id_t id, const char* name, bool required);

@@ -32,6 +32,10 @@
 #include "data_logger.h"
 #include "sd_logger.h"
 #include "fuzzy_logic.h"
+#include "device_manager.h"
+#include "self_test.h"
+#include "sensor_health.h"
+#include <esp_task_wdt.h>
 
 // ============================================================================
 // GLOBAL INSTANCES
@@ -111,6 +115,22 @@ void setup() {
     // Load configuration from NVS
     loadConfiguration();
 
+    // Initialize device manager (uses enabled_devices from config)
+    deviceManager.begin(&systemConfig.enabled_devices);
+
+    // Initialize sensor health monitor
+    sensorHealth.begin();
+
+    // Log boot reason
+    selfTest.logBootReason();
+
+    // Run power-on self-test (updates deviceManager with installed status)
+    self_test_result_t post_result = selfTest.runAll();
+
+    // Arm hardware watchdog (30-second timeout, panic on expiry)
+    esp_task_wdt_init(30, true);
+    esp_task_wdt_add(NULL);  // Subscribe Arduino loop() task
+
     // Initialize subsystems
     Serial.println("Initializing subsystems...");
 
@@ -167,9 +187,17 @@ void setup() {
     // SD card logger (shares VSPI bus with MAX31865)
     if (!sdLogger.begin(SD_CS_PIN, SPI, spiMutex)) {
         Serial.println("WARNING: SD card not available — logging to WiFi/buffer only");
+        deviceManager.setInstalled(DEV_SD_CARD, false);
     } else {
         display.showMessage("SD Card OK", sdLogger.getCurrentFilename());
+        deviceManager.setInstalled(DEV_SD_CARD, true);
         delay(500);
+    }
+
+    // Log boot event to SD (includes reset reason)
+    if (sdLogger.isAvailable()) {
+        sdLogger.logEvent("BOOT", selfTest.getResetReasonString(),
+                          (int32_t)esp_reset_reason());
     }
 
     // Initialize feedwater pump monitor input (optocoupler output, external 10k pull-up)
@@ -254,6 +282,8 @@ void loop() {
     // Main loop is mostly empty since we use FreeRTOS tasks
     // Handle any non-time-critical operations here
 
+    esp_task_wdt_reset();  // Feed the hardware watchdog
+
     // Check for button presses
     processInputs();
 
@@ -266,9 +296,28 @@ void loop() {
 // ============================================================================
 
 void taskControlLoop(void* parameter) {
+    esp_task_wdt_add(NULL);  // Subscribe this task to watchdog
     TickType_t lastWakeTime = xTaskGetTickCount();
 
     while (true) {
+        esp_task_wdt_reset();  // Feed the watchdog
+
+        // --- Sensor health check ---
+        sensorHealth.update();
+
+        // --- Safe mode enforcement ---
+        if (sensorHealth.isInSafeMode()) {
+            blowdownController.closeValve();
+            pumpManager.stopAll();
+
+            // Still monitor feedwater pump and check alarms
+            updateFeedwaterPumpMonitor();
+            checkAlarms();
+
+            vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(TASK_PERIOD_CONTROL_MS));
+            continue;  // Skip normal control logic
+        }
+
         // --- Feedwater pump monitoring (GPIO35 via optocoupler) ---
         updateFeedwaterPumpMonitor();
 
@@ -341,7 +390,25 @@ void taskMeasurementLoop(void* parameter) {
             systemState.conductivity_compensated = reading.temp_compensated;
             systemState.conductivity_calibrated = reading.calibrated;
             systemState.temperature_celsius = reading.temperature_c;
+
+            // Report to sensor health monitor
+            if (reading.sensor_ok) {
+                sensorHealth.reportConductivityOK(reading.calibrated);
+            } else {
+                sensorHealth.reportConductivityFail();
+            }
+
+            if (reading.temp_sensor_ok) {
+                sensorHealth.reportTemperatureOK(reading.temperature_c);
+            } else {
+                sensorHealth.reportTemperatureFail();
+            }
+
+            // Mark measurement cycle as fresh
+            sensorHealth.reportMeasurementCycle();
         }
+        // If mutex not acquired, measurement is stale — sensorHealth.update()
+        // in the control task will detect this via getMeasurementAge().
 
         // Update water meters
         waterMeterManager.update();
@@ -515,6 +582,9 @@ void initializeDefaults() {
     systemConfig.led_brightness = LED_BRIGHTNESS;
     systemConfig.display_in_ppm = false;
 
+    // Hardware device enable defaults (all devices enabled on first boot)
+    systemConfig.enabled_devices = HW_CONFIG_DEFAULT_ENABLED;
+
     // Save defaults
     saveConfiguration();
 }
@@ -528,23 +598,27 @@ void checkAlarms() {
     float cond = systemState.conductivity_calibrated;
     uint16_t setpoint = systemConfig.blowdown.setpoint;
 
-    // High conductivity alarm
-    if (systemConfig.alarms.use_percent_alarms) {
-        float high_threshold = setpoint * (1.0 + systemConfig.alarms.cond_high_percent / 100.0);
-        float low_threshold = setpoint * (1.0 - systemConfig.alarms.cond_low_percent / 100.0);
+    // Only evaluate conductivity alarms if sensor data is valid
+    bool sensor_valid = sensorHealth.isConductivityValid();
 
-        if (cond > high_threshold && systemConfig.alarms.cond_high_percent > 0) {
-            new_alarms |= ALARM_COND_HIGH;
-        }
-        if (cond < low_threshold && systemConfig.alarms.cond_low_percent > 0) {
-            new_alarms |= ALARM_COND_LOW;
-        }
-    } else {
-        if (cond > systemConfig.alarms.cond_high_absolute && systemConfig.alarms.cond_high_absolute > 0) {
-            new_alarms |= ALARM_COND_HIGH;
-        }
-        if (cond < systemConfig.alarms.cond_low_absolute && systemConfig.alarms.cond_low_absolute > 0) {
-            new_alarms |= ALARM_COND_LOW;
+    if (sensor_valid) {
+        if (systemConfig.alarms.use_percent_alarms) {
+            float high_threshold = setpoint * (1.0 + systemConfig.alarms.cond_high_percent / 100.0);
+            float low_threshold = setpoint * (1.0 - systemConfig.alarms.cond_low_percent / 100.0);
+
+            if (cond > high_threshold && systemConfig.alarms.cond_high_percent > 0) {
+                new_alarms |= ALARM_COND_HIGH;
+            }
+            if (cond < low_threshold && systemConfig.alarms.cond_low_percent > 0) {
+                new_alarms |= ALARM_COND_LOW;
+            }
+        } else {
+            if (cond > systemConfig.alarms.cond_high_absolute && systemConfig.alarms.cond_high_absolute > 0) {
+                new_alarms |= ALARM_COND_HIGH;
+            }
+            if (cond < systemConfig.alarms.cond_low_absolute && systemConfig.alarms.cond_low_absolute > 0) {
+                new_alarms |= ALARM_COND_LOW;
+            }
         }
     }
 
@@ -553,16 +627,26 @@ void checkAlarms() {
         new_alarms |= ALARM_BLOWDOWN_TIMEOUT;
     }
 
-    // Sensor errors
-    if (!conductivitySensor.isSensorOK()) {
+    // Sensor errors (from health monitor, not raw sensor flag)
+    if (!conductivitySensor.isSensorOK() || !sensor_valid) {
         new_alarms |= ALARM_SENSOR_ERROR;
     }
     if (!conductivitySensor.isTempSensorOK()) {
         new_alarms |= ALARM_TEMP_ERROR;
     }
 
-    // Drum level switch (AUX_INPUT2 repurposed for MAX31865 SCK)
-    if (digitalRead(AUX_INPUT1_PIN) == LOW) {
+    // Stale data alarm
+    if (!sensorHealth.isMeasurementFresh()) {
+        new_alarms |= ALARM_STALE_DATA;
+    }
+
+    // Safe mode alarm
+    if (sensorHealth.isInSafeMode()) {
+        new_alarms |= ALARM_SAFE_MODE;
+    }
+
+    // Drum level switch
+    if (deviceManager.isEnabled(DEV_AUX_INPUT_1) && digitalRead(AUX_INPUT1_PIN) == LOW) {
         new_alarms |= ALARM_DRUM_LEVEL_1;
     }
 
@@ -571,10 +655,9 @@ void checkAlarms() {
         new_alarms |= ALARM_VALVE_FAULT;
     }
 
-    // Check for new alarms
+    // --- Rising edge (new alarms) ---
     uint16_t rising_alarms = new_alarms & ~systemState.active_alarms;
 
-    // Log new alarms
     if (rising_alarms & ALARM_COND_HIGH) {
         dataLogger.logAlarm(ALARM_COND_HIGH, "HIGH CONDUCTIVITY", true, cond);
         display.showAlarm("HIGH CONDUCTIVITY");
@@ -596,9 +679,41 @@ void checkAlarms() {
                             true, blowdownController.getFeedbackmA());
         display.showAlarm("VALVE FAULT");
     }
+    if (rising_alarms & ALARM_STALE_DATA) {
+        dataLogger.logAlarm(ALARM_STALE_DATA, "STALE DATA", true,
+                            (float)sensorHealth.getMeasurementAge());
+        display.showAlarm("STALE DATA");
+    }
+    if (rising_alarms & ALARM_SAFE_MODE) {
+        dataLogger.logAlarm(ALARM_SAFE_MODE, "SAFE MODE", true,
+                            (float)sensorHealth.getSafeMode());
+        display.showAlarm("SAFE MODE");
+    }
 
-    // Check for cleared alarms
+    // --- Falling edge (cleared alarms) — log each individually ---
     uint16_t falling_alarms = systemState.active_alarms & ~new_alarms;
+
+    if (falling_alarms & ALARM_COND_HIGH) {
+        dataLogger.logAlarm(ALARM_COND_HIGH, "HIGH CONDUCTIVITY", false, cond);
+    }
+    if (falling_alarms & ALARM_COND_LOW) {
+        dataLogger.logAlarm(ALARM_COND_LOW, "LOW CONDUCTIVITY", false, cond);
+    }
+    if (falling_alarms & ALARM_BLOWDOWN_TIMEOUT) {
+        dataLogger.logAlarm(ALARM_BLOWDOWN_TIMEOUT, "BLOWDOWN TIMEOUT", false, 0);
+    }
+    if (falling_alarms & ALARM_SENSOR_ERROR) {
+        dataLogger.logAlarm(ALARM_SENSOR_ERROR, "SENSOR ERROR", false, 0);
+    }
+    if (falling_alarms & ALARM_VALVE_FAULT) {
+        dataLogger.logAlarm(ALARM_VALVE_FAULT, "VALVE FAULT", false, 0);
+    }
+    if (falling_alarms & ALARM_STALE_DATA) {
+        dataLogger.logAlarm(ALARM_STALE_DATA, "STALE DATA", false, 0);
+    }
+    if (falling_alarms & ALARM_SAFE_MODE) {
+        dataLogger.logAlarm(ALARM_SAFE_MODE, "SAFE MODE", false, 0);
+    }
 
     if (falling_alarms) {
         display.clearAlarm();

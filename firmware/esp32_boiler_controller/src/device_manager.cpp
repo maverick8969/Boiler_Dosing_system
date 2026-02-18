@@ -14,7 +14,7 @@ DeviceManager deviceManager;
 // ============================================================================
 
 DeviceManager::DeviceManager()
-    : _config(nullptr)
+    : _enabled_ptr(nullptr)
 {
     // Initialize all device slots
     initDevice(DEV_CONDUCTIVITY_PROBE, "Cond Probe",      true);   // Required
@@ -51,16 +51,16 @@ void DeviceManager::initDevice(device_id_t id, const char* name, bool required) 
 // INITIALIZATION
 // ============================================================================
 
-void DeviceManager::begin(hardware_config_t* config) {
-    _config = config;
+void DeviceManager::begin(uint16_t* enabled_devices_ptr) {
+    _enabled_ptr = enabled_devices_ptr;
 
-    if (_config) {
+    if (_enabled_ptr) {
         // Apply stored enable flags
         for (int i = 0; i < DEV_COUNT; i++) {
             if (_devices[i].required) {
                 _devices[i].enabled = true;  // Always force required ON
             } else {
-                _devices[i].enabled = (_config->enabled_devices >> i) & 0x01;
+                _devices[i].enabled = (*_enabled_ptr >> i) & 0x01;
             }
             updateState((device_id_t)i);
         }
@@ -91,12 +91,12 @@ bool DeviceManager::setEnabled(device_id_t id, bool enable) {
 
     _devices[id].enabled = enable;
 
-    // Update stored config
-    if (_config) {
+    // Update stored config bitmask
+    if (_enabled_ptr) {
         if (enable) {
-            _config->enabled_devices |= (1 << id);
+            *_enabled_ptr |= (1 << id);
         } else {
-            _config->enabled_devices &= ~(1 << id);
+            *_enabled_ptr &= ~(1 << id);
         }
     }
 
@@ -164,12 +164,12 @@ void DeviceManager::reportOK(device_id_t id) {
 
     _devices[id].last_ok_time = millis();
 
-    // Require N consecutive good operations to clear fault
-    if (_devices[id].fault_count > 0) {
-        _devices[id].fault_count--;
-    }
+    // A single good operation resets the consecutive fault counter.
+    // The caller (SensorHealthMonitor) handles N-of-M hysteresis;
+    // DeviceManager trusts the caller's judgment on recovery.
+    _devices[id].fault_count = 0;
 
-    if (_devices[id].fault_count == 0 && !_devices[id].healthy) {
+    if (!_devices[id].healthy) {
         _devices[id].healthy = true;
         _devices[id].installed = true;  // Re-mark as installed if recovered
         updateState(id);

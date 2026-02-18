@@ -55,12 +55,12 @@ static int tests_failed = 0;
 // TEST FIXTURES
 // ============================================================================
 
-static hardware_config_t test_hw_config;
+static uint16_t test_enabled_devices;
 
 void resetTestState() {
     // Reset DeviceManager
-    test_hw_config.enabled_devices = HW_CONFIG_DEFAULT_ENABLED;
-    deviceManager.begin(&test_hw_config);
+    test_enabled_devices = HW_CONFIG_DEFAULT_ENABLED;
+    deviceManager.begin(&test_enabled_devices);
 
     // Reset SensorHealth
     sensorHealth.begin();
@@ -179,7 +179,7 @@ void test_sensor_disabled() {
                 "State is DISABLED");
 
     // Verify bitmask updated
-    TEST_ASSERT(!(test_hw_config.enabled_devices & (1 << DEV_WATER_METER_2)),
+    TEST_ASSERT(!(test_enabled_devices & (1 << DEV_WATER_METER_2)),
                 "NVS config bitmask cleared for WM2");
 }
 
@@ -239,7 +239,7 @@ void test_reenable_runtime() {
                 "State is OK after re-enable");
 
     // Verify NVS bitmask
-    TEST_ASSERT(test_hw_config.enabled_devices & (1 << DEV_PUMP_AMINE),
+    TEST_ASSERT(test_enabled_devices & (1 << DEV_PUMP_AMINE),
                 "NVS config bitmask set for Pump Amine");
 }
 

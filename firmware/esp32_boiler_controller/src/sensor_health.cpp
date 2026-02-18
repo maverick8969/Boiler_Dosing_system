@@ -377,8 +377,9 @@ void SensorHealthMonitor::handleSensorFault(sensor_health_t* health, device_id_t
     if (health->consecutive_failures >= HEALTH_CONSECUTIVE_FAIL_LIMIT) {
         if (!health->faulted) {
             health->faulted = true;
+            const device_info_t* info = deviceManager.getDeviceInfo(dev_id);
             Serial.printf("SensorHealth: %s FAULTED after %d consecutive failures\n",
-                deviceManager.getDeviceInfo(dev_id)->name,
+                info ? info->name : "UNKNOWN",
                 health->consecutive_failures);
         }
         deviceManager.reportFault(dev_id);
@@ -396,8 +397,9 @@ void SensorHealthMonitor::handleSensorOK(sensor_health_t* health, device_id_t de
 
         if (health->faulted) {
             health->faulted = false;
+            const device_info_t* info = deviceManager.getDeviceInfo(dev_id);
             Serial.printf("SensorHealth: %s recovered after %d consecutive good reads\n",
-                deviceManager.getDeviceInfo(dev_id)->name,
+                info ? info->name : "UNKNOWN",
                 health->consecutive_ok);
         }
         deviceManager.reportOK(dev_id);

@@ -48,9 +48,8 @@ typedef enum {
 #define HEALTH_I2C_RECOVERY_INTERVAL_MS 30000   // Try I2C recovery every 30s if faulted
 #define HEALTH_SAFE_MODE_HOLD_MS        10000   // Min time in safe mode before auto-exit
 
-// Alarm code for safe mode (extend the alarm bitmask)
-#define ALARM_STALE_DATA                0x4000
-#define ALARM_SAFE_MODE                 0x8000
+// Alarm codes ALARM_STALE_DATA (0x4000) and ALARM_SAFE_MODE (0x8000)
+// are defined in config.h alongside the other alarm bitmask values.
 
 // ============================================================================
 // SENSOR HEALTH TRACKER (per-sensor)

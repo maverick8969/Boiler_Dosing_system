@@ -9,6 +9,9 @@
 #include "water_meter.h"
 #include "blowdown.h"
 #include "data_logger.h"
+#include "device_manager.h"
+#include "sensor_health.h"
+#include "self_test.h"
 #include <stdarg.h>
 
 // Global instance
@@ -73,6 +76,8 @@ Display::Display()
     , _alarm_active(false)
     , _alarm_flash_state(false)
     , _alarm_flash_time(0)
+    , _hw_config_cursor(0)
+    , _hw_config_editing(false)
 {
     memset(_message_line1, 0, sizeof(_message_line1));
     memset(_message_line2, 0, sizeof(_message_line2));
@@ -176,6 +181,12 @@ void Display::update() {
             break;
         case SCREEN_NETWORK:
             drawNetworkScreen();
+            break;
+        case SCREEN_HW_CONFIG:
+            drawHWConfigScreen();
+            break;
+        case SCREEN_SELF_TEST:
+            drawSelfTestScreen();
             break;
         default:
             break;
@@ -550,8 +561,13 @@ void Display::drawNetworkScreen() {
 // ============================================================================
 
 void Display::updatePowerLED() {
-    // Green when OK, red on any error
-    _leds[LED_POWER] = COLOR_GREEN;
+    if (sensorHealth.isInSafeMode()) {
+        _leds[LED_POWER] = COLOR_RED;
+    } else if (deviceManager.countFaulted() > 0) {
+        _leds[LED_POWER] = COLOR_ORANGE;
+    } else {
+        _leds[LED_POWER] = COLOR_GREEN;
+    }
 }
 
 void Display::updateWiFiLED() {
@@ -652,5 +668,109 @@ CRGB Display::conductivityToColor(float value, float setpoint, float deadband) {
         return COLOR_BLUE;
     } else {
         return COLOR_GREEN;
+    }
+}
+
+// ============================================================================
+// MENU METHODS
+// ============================================================================
+
+void Display::toggleMenu() {
+    if (_current_screen == SCREEN_HW_CONFIG || _current_screen == SCREEN_MENU) {
+        // Exit menu → return to main screen
+        _hw_config_editing = false;
+        setScreen(SCREEN_MAIN);
+    } else {
+        // Enter menu → go to HW config
+        _hw_config_cursor = 0;
+        _hw_config_editing = false;
+        setScreen(SCREEN_HW_CONFIG);
+    }
+}
+
+void Display::select() {
+    if (_current_screen == SCREEN_HW_CONFIG) {
+        // Toggle enable/disable for the highlighted device
+        device_id_t id = (device_id_t)_hw_config_cursor;
+        if (!deviceManager.isRequired(id)) {
+            bool new_state = !deviceManager.isEnabled(id);
+            deviceManager.setEnabled(id, new_state);
+        } else {
+            showMessage("Required Device", "Cannot disable");
+        }
+    }
+    // Other screens: no action yet (future: enter sub-menus)
+}
+
+// ============================================================================
+// HARDWARE CONFIG SCREEN
+// ============================================================================
+
+void Display::drawHWConfigScreen() {
+    char line[21];
+
+    // Title bar with cursor position
+    snprintf(line, sizeof(line), "= HW Config %2d/%d =",
+             _hw_config_cursor + 1, DEV_COUNT);
+    _lcd.setCursor(0, 0);
+    _lcd.print(line);
+
+    // Show current device
+    device_id_t id = (device_id_t)_hw_config_cursor;
+    const device_info_t* info = deviceManager.getDeviceInfo(id);
+    if (!info) return;
+
+    // Line 2: Device name
+    snprintf(line, sizeof(line), "%-20s", info->name);
+    _lcd.setCursor(0, 1);
+    _lcd.print(line);
+
+    // Line 3: Enabled/Required status
+    if (info->required) {
+        snprintf(line, sizeof(line), "State: REQUIRED     ");
+    } else if (info->enabled) {
+        snprintf(line, sizeof(line), "State: Enabled      ");
+    } else {
+        snprintf(line, sizeof(line), "State: Disabled     ");
+    }
+    _lcd.setCursor(0, 2);
+    _lcd.print(line);
+
+    // Line 4: Runtime status
+    const char* state_str = deviceManager.getStateString(id);
+    snprintf(line, sizeof(line), "Status: %-12s", state_str);
+    _lcd.setCursor(0, 3);
+    _lcd.print(line);
+}
+
+// ============================================================================
+// SELF-TEST RESULTS SCREEN
+// ============================================================================
+
+void Display::drawSelfTestScreen() {
+    char line[21];
+
+    self_test_result_t result = selfTest.getLastResult();
+
+    _lcd.setCursor(0, 0);
+    _lcd.print("== Self-Test ==");
+
+    snprintf(line, sizeof(line), "Pass: %d  Fail: %d",
+             result.total_passed, result.total_failed);
+    _lcd.setCursor(0, 1);
+    _lcd.print(line);
+
+    snprintf(line, sizeof(line), "Skip: %d  Total: %d",
+             result.total_skipped, result.total_tested);
+    _lcd.setCursor(0, 2);
+    _lcd.print(line);
+
+    _lcd.setCursor(0, 3);
+    if (result.critical_failure) {
+        _lcd.print("** CRITICAL FAIL ** ");
+    } else if (result.total_failed > 0) {
+        _lcd.print("Optional dev missing");
+    } else {
+        _lcd.print("All systems OK      ");
     }
 }

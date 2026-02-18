@@ -153,12 +153,10 @@ bool SelfTest::testADS1115() {
 }
 
 bool SelfTest::testEZO_EC() {
-    // The EZO-EC is already initialized by conductivitySensor.begin().
-    // We check the stored result from ConductivitySensor::_ezo_ok.
-    // For an independent test, we send the 'i' query.
-
-    // Note: This test assumes Serial2 is already configured.
-    // If called before conductivitySensor.begin(), we need to init UART first.
+    // Ensure Serial2 is configured before probing.
+    // If conductivitySensor.begin() hasn't run yet, init UART ourselves.
+    Serial2.begin(EZO_EC_BAUD_RATE, SERIAL_8N1, EZO_EC_RX_PIN, EZO_EC_TX_PIN);
+    delay(100);  // Allow UART to stabilize
 
     // Drain any pending data
     while (Serial2.available()) Serial2.read();
