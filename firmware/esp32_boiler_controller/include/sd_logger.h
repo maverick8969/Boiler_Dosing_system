@@ -30,6 +30,17 @@
 struct sensor_reading_t;
 
 // ============================================================================
+// SD CARD STATUS
+// ============================================================================
+
+typedef enum {
+    SD_STATUS_OK = 0,           // Mounted and writable
+    SD_STATUS_NO_CARD,          // No card physically detected
+    SD_STATUS_MOUNT_FAILED,     // Card detected but filesystem mount failed (needs format)
+    SD_STATUS_NOT_INITIALIZED   // begin() hasn't been called yet
+} sd_card_status_t;
+
+// ============================================================================
 // SD LOGGER CONFIGURATION
 // ============================================================================
 
@@ -127,6 +138,23 @@ public:
      */
     const char* getCurrentFilename();
 
+    /**
+     * @brief Get SD card status
+     * @return SD_STATUS_OK, SD_STATUS_NO_CARD, SD_STATUS_MOUNT_FAILED, or SD_STATUS_NOT_INITIALIZED
+     */
+    sd_card_status_t getCardStatus();
+
+    /**
+     * @brief Format the SD card as FAT32 and mount it
+     *
+     * Destroys all existing data on the card. Use for blank or
+     * corrupted cards that fail to mount during begin().
+     * Requires SPI mutex — blocks until format completes.
+     *
+     * @return true if format and mount succeeded
+     */
+    bool formatCard();
+
 private:
     // Hardware
     uint8_t _csPin;
@@ -136,6 +164,7 @@ private:
     // State
     bool _available;
     bool _headerWritten;
+    sd_card_status_t _card_status;
     File _dataFile;
     char _currentFilename[SD_MAX_FILENAME_LEN];
     char _currentDate[12];              // "YYYY-MM-DD"

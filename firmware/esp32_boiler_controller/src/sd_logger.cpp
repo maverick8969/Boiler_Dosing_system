@@ -25,6 +25,7 @@ SDLogger::SDLogger()
     , _spiMutex(nullptr)
     , _available(false)
     , _headerWritten(false)
+    , _card_status(SD_STATUS_NOT_INITIALIZED)
     , _recordsToday(0)
     , _lastFlushTime(0)
     , _bootSequence(0)
@@ -48,13 +49,40 @@ bool SDLogger::begin(uint8_t csPin, SPIClass& spi, SemaphoreHandle_t mutex) {
     if (!takeSPI(2000)) {
         Serial.println("  ERROR: Could not acquire SPI mutex for SD init");
         _available = false;
+        _card_status = SD_STATUS_NO_CARD;
         return false;
     }
 
+    // Try to mount the existing filesystem (do NOT auto-format)
     if (!SD.begin(_csPin, *_spi, SD_SPI_FREQ)) {
+        // Mount failed — probe the SPI bus to distinguish "no card" from
+        // "card present but unformatted/corrupted".
+        // Toggle CS and clock out bytes; a card on the bus pulls MISO low
+        // during its response, while an empty slot reads back 0xFF.
+        _spi->beginTransaction(SPISettings(400000, MSBFIRST, SPI_MODE0));
+        digitalWrite(_csPin, LOW);
+        delayMicroseconds(10);
+        // Send CMD0 preamble (>74 clocks with CS high already happened in SD.begin)
+        // Just read a few bytes — any non-0xFF suggests hardware present
+        bool card_responding = false;
+        for (int i = 0; i < 4; i++) {
+            if (_spi->transfer(0xFF) != 0xFF) {
+                card_responding = true;
+            }
+        }
+        digitalWrite(_csPin, HIGH);
+        _spi->endTransaction();
         giveSPI();
-        Serial.println("  WARNING: SD card not detected or mount failed");
+
         _available = false;
+        if (card_responding) {
+            _card_status = SD_STATUS_MOUNT_FAILED;
+            Serial.println("  WARNING: SD card detected but filesystem mount failed");
+            Serial.println("  Card may need formatting — use POST /api/sd/format or web UI");
+        } else {
+            _card_status = SD_STATUS_NO_CARD;
+            Serial.println("  WARNING: No SD card detected");
+        }
         return false;
     }
 
@@ -64,10 +92,12 @@ bool SDLogger::begin(uint8_t csPin, SPIClass& spi, SemaphoreHandle_t mutex) {
     if (cardType == CARD_NONE) {
         Serial.println("  WARNING: No SD card inserted");
         _available = false;
+        _card_status = SD_STATUS_NO_CARD;
         return false;
     }
 
     _available = true;
+    _card_status = SD_STATUS_OK;
 
     const char* typeStr = "UNKNOWN";
     if (cardType == CARD_MMC)  typeStr = "MMC";
@@ -238,6 +268,76 @@ uint32_t SDLogger::getUsedSpaceMB() {
 
 const char* SDLogger::getCurrentFilename() {
     return _currentFilename;
+}
+
+sd_card_status_t SDLogger::getCardStatus() {
+    return _card_status;
+}
+
+bool SDLogger::formatCard() {
+    Serial.println("SD FORMAT: Starting FAT32 format...");
+
+    if (!_spi) {
+        Serial.println("SD FORMAT: SPI not initialized — call begin() first");
+        return false;
+    }
+
+    if (!takeSPI(5000)) {
+        Serial.println("SD FORMAT: Could not acquire SPI mutex");
+        return false;
+    }
+
+    // Close any open file handles
+    if (_dataFile) {
+        _dataFile.flush();
+        _dataFile.close();
+    }
+
+    // Tear down existing mount
+    SD.end();
+    delay(100);
+
+    // Re-initialize with format_if_empty=true (6th parameter)
+    // This tells esp_vfs_fat_sdspi_mount() to format the card if
+    // the FAT filesystem cannot be mounted.
+    bool ok = SD.begin(_csPin, *_spi, SD_SPI_FREQ, "/sd", 5, true);
+
+    if (!ok) {
+        giveSPI();
+        Serial.println("SD FORMAT: Format failed — no card or hardware error");
+        _card_status = SD_STATUS_NO_CARD;
+        _available = false;
+        return false;
+    }
+
+    uint8_t cardType = SD.cardType();
+    if (cardType == CARD_NONE) {
+        giveSPI();
+        Serial.println("SD FORMAT: No card detected after format attempt");
+        _card_status = SD_STATUS_NO_CARD;
+        _available = false;
+        return false;
+    }
+
+    // Format + mount succeeded — create log directories
+    ensureDirectory(SD_LOG_DIR);
+    ensureDirectory(SD_EVENT_DIR);
+
+    giveSPI();
+
+    _available = true;
+    _card_status = SD_STATUS_OK;
+    _headerWritten = false;
+    _recordsToday = 0;
+    memset(_currentDate, 0, sizeof(_currentDate));
+
+    const char* typeStr = "UNKNOWN";
+    if (cardType == CARD_MMC)  typeStr = "MMC";
+    if (cardType == CARD_SD)   typeStr = "SD";
+    if (cardType == CARD_SDHC) typeStr = "SDHC";
+
+    Serial.printf("SD FORMAT: Success — %s card, %lu MB\n", typeStr, getCardSizeMB());
+    return true;
 }
 
 // ============================================================================

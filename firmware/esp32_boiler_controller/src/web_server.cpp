@@ -7,6 +7,7 @@
 #include "device_manager.h"
 #include "sensor_health.h"
 #include "self_test.h"
+#include "sd_logger.h"
 #include <WiFi.h>
 
 // Global instance
@@ -43,6 +44,9 @@ bool BoilerWebServer::begin(system_config_t* config, FuzzyController* fuzzy) {
     _server.on("/api/status", HTTP_GET, [this]() { handleGetStatus(); });
     _server.on("/api/fuzzy", HTTP_GET, [this]() { handleGetFuzzy(); });
     _server.on("/api/devices", HTTP_GET, [this]() { handleGetDevices(); });
+    _server.on("/api/sd/status", HTTP_GET, [this]() { handleGetSDStatus(); });
+    _server.on("/api/sd/format", HTTP_POST, [this]() { handlePostSDFormat(); });
+    _server.on("/api/sd/format", HTTP_OPTIONS, [this]() { sendCORSHeaders(); _server.send(204); });
     _server.on("/api/tests", HTTP_GET, [this]() { handleGetTests(); });
     _server.on("/api/tests", HTTP_POST, [this]() { handlePostTest(); });
     _server.on("/api/tests", HTTP_DELETE, [this]() { handleClearTests(); });
@@ -260,6 +264,76 @@ void BoilerWebServer::handleGetDevices() {
     String response;
     serializeJson(doc, response);
     _server.send(200, "application/json", response);
+}
+
+void BoilerWebServer::handleGetSDStatus() {
+    sendCORSHeaders();
+
+    JsonDocument doc;
+
+    sd_card_status_t status = sdLogger.getCardStatus();
+    doc["available"] = sdLogger.isAvailable();
+
+    switch (status) {
+        case SD_STATUS_OK:              doc["status"] = "OK"; break;
+        case SD_STATUS_NO_CARD:         doc["status"] = "NO_CARD"; break;
+        case SD_STATUS_MOUNT_FAILED:    doc["status"] = "MOUNT_FAILED"; break;
+        case SD_STATUS_NOT_INITIALIZED: doc["status"] = "NOT_INITIALIZED"; break;
+        default:                        doc["status"] = "UNKNOWN"; break;
+    }
+
+    doc["needs_format"] = (status == SD_STATUS_MOUNT_FAILED);
+
+    if (sdLogger.isAvailable()) {
+        doc["size_mb"] = sdLogger.getCardSizeMB();
+        doc["used_mb"] = sdLogger.getUsedSpaceMB();
+        doc["records_today"] = sdLogger.getRecordsToday();
+        doc["current_file"] = sdLogger.getCurrentFilename();
+    }
+
+    String response;
+    serializeJson(doc, response);
+    _server.send(200, "application/json", response);
+}
+
+void BoilerWebServer::handlePostSDFormat() {
+    sendCORSHeaders();
+
+    // Require explicit confirmation to prevent accidental data loss
+    if (!_server.hasArg("plain")) {
+        _server.send(400, "application/json",
+            "{\"error\":\"POST body required with {\\\"confirm\\\":true}\"}");
+        return;
+    }
+
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, _server.arg("plain"));
+
+    if (error || !doc.containsKey("confirm") || doc["confirm"] != true) {
+        _server.send(400, "application/json",
+            "{\"error\":\"Send {\\\"confirm\\\":true} to format. THIS DESTROYS ALL DATA.\"}");
+        return;
+    }
+
+    Serial.println("Web API: SD card format requested");
+
+    bool ok = sdLogger.formatCard();
+
+    // Update DeviceManager to reflect new SD card state
+    deviceManager.setInstalled(DEV_SD_CARD, ok);
+
+    JsonDocument resp;
+    resp["success"] = ok;
+    if (ok) {
+        resp["message"] = "SD card formatted and mounted successfully";
+        resp["size_mb"] = sdLogger.getCardSizeMB();
+    } else {
+        resp["message"] = "Format failed — check card is inserted and retry";
+    }
+
+    String response;
+    serializeJson(resp, response);
+    _server.send(ok ? 200 : 500, "application/json", response);
 }
 
 void BoilerWebServer::handlePostTest() {
