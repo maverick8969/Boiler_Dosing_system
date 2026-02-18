@@ -50,7 +50,10 @@ bool BoilerWebServer::begin(system_config_t* config, FuzzyController* fuzzy) {
     _running = true;
 
     Serial.printf("Web server started on port %d\n", WEB_SERVER_PORT);
-    Serial.printf("Access at: http://%s/\n", WiFi.localIP().toString().c_str());
+    Serial.printf("  AP:  http://%s/\n", WiFi.softAPIP().toString().c_str());
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.printf("  STA: http://%s/\n", WiFi.localIP().toString().c_str());
+    }
 
     return true;
 }

@@ -27,8 +27,8 @@
  │   ───────          ──────            ─────          ────────       ──      │
  │   3x A4988         EZO-EC (UART)     I2C Bus        SPDT Relay    LCD     │
  │   + Nema17         MAX31865 (VSPI)   WS2812 LED     + MOSFET      Encoder │
- │                    SD Card (VSPI)                                         │
- │                    ADS1115 (I2C)                                          │
+ │                    SD Card (VSPI)    WiFi AP+STA                          │
+ │                    ADS1115 (I2C)     Web UI :80                           │
  │                    Water Meter                                            │
  │                    FW Pump Monitor                                        │
  └────────────────────────────────────────────────────────────────────────────┘
