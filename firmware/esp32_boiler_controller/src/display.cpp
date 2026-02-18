@@ -12,6 +12,7 @@
 #include "device_manager.h"
 #include "sensor_health.h"
 #include "self_test.h"
+#include "sd_logger.h"
 #include <stdarg.h>
 
 // Global instance
@@ -78,6 +79,7 @@ Display::Display()
     , _alarm_flash_time(0)
     , _hw_config_cursor(0)
     , _hw_config_editing(false)
+    , _sd_format_confirm(false)
 {
     memset(_message_line1, 0, sizeof(_message_line1));
     memset(_message_line2, 0, sizeof(_message_line2));
@@ -185,6 +187,9 @@ void Display::update() {
         case SCREEN_HW_CONFIG:
             drawHWConfigScreen();
             break;
+        case SCREEN_SD_CARD:
+            drawSDCardScreen();
+            break;
         case SCREEN_SELF_TEST:
             drawSelfTestScreen();
             break;
@@ -201,11 +206,13 @@ void Display::setScreen(display_screen_t screen) {
 }
 
 void Display::nextScreen() {
+    _sd_format_confirm = false;
     _current_screen = (display_screen_t)((_current_screen + 1) % SCREEN_COUNT);
     _lcd.clear();
 }
 
 void Display::prevScreen() {
+    _sd_format_confirm = false;
     if (_current_screen == 0) {
         _current_screen = (display_screen_t)(SCREEN_COUNT - 1);
     } else {
@@ -676,14 +683,17 @@ CRGB Display::conductivityToColor(float value, float setpoint, float deadband) {
 // ============================================================================
 
 void Display::toggleMenu() {
-    if (_current_screen == SCREEN_HW_CONFIG || _current_screen == SCREEN_MENU) {
+    if (_current_screen == SCREEN_HW_CONFIG || _current_screen == SCREEN_MENU
+        || _current_screen == SCREEN_SD_CARD) {
         // Exit menu → return to main screen
         _hw_config_editing = false;
+        _sd_format_confirm = false;
         setScreen(SCREEN_MAIN);
     } else {
         // Enter menu → go to HW config
         _hw_config_cursor = 0;
         _hw_config_editing = false;
+        _sd_format_confirm = false;
         setScreen(SCREEN_HW_CONFIG);
     }
 }
@@ -698,8 +708,26 @@ void Display::select() {
         } else {
             showMessage("Required Device", "Cannot disable");
         }
+    } else if (_current_screen == SCREEN_SD_CARD) {
+        sd_card_status_t status = sdLogger.getCardStatus();
+        if (status == SD_STATUS_MOUNT_FAILED || status == SD_STATUS_NO_CARD) {
+            if (_sd_format_confirm) {
+                // Second press — actually format
+                _sd_format_confirm = false;
+                showMessage("Formatting SD...", "Please wait", 10000);
+                bool ok = sdLogger.formatCard();
+                if (ok) {
+                    deviceManager.setInstalled(DEV_SD_CARD, true);
+                    showMessage("SD Format OK", "Card is ready");
+                } else {
+                    showMessage("SD Format FAILED", "Check card");
+                }
+            } else {
+                // First press — ask for confirmation
+                _sd_format_confirm = true;
+            }
+        }
     }
-    // Other screens: no action yet (future: enter sub-menus)
 }
 
 // ============================================================================
@@ -741,6 +769,71 @@ void Display::drawHWConfigScreen() {
     snprintf(line, sizeof(line), "Status: %-12s", state_str);
     _lcd.setCursor(0, 3);
     _lcd.print(line);
+}
+
+// ============================================================================
+// SD CARD SCREEN
+// ============================================================================
+
+void Display::drawSDCardScreen() {
+    char line[21];
+    sd_card_status_t status = sdLogger.getCardStatus();
+
+    _lcd.setCursor(0, 0);
+    _lcd.print("==== SD Card ====   ");
+
+    switch (status) {
+        case SD_STATUS_OK: {
+            uint32_t sizeMB = sdLogger.getCardSizeMB();
+            uint32_t usedMB = sdLogger.getUsedSpaceMB();
+
+            snprintf(line, sizeof(line), "Size: %5lu MB      ", sizeMB);
+            _lcd.setCursor(0, 1);
+            _lcd.print(line);
+
+            snprintf(line, sizeof(line), "Used: %5lu MB      ", usedMB);
+            _lcd.setCursor(0, 2);
+            _lcd.print(line);
+
+            snprintf(line, sizeof(line), "Records: %lu        ", sdLogger.getRecordsToday());
+            _lcd.setCursor(0, 3);
+            _lcd.print(line);
+            break;
+        }
+
+        case SD_STATUS_MOUNT_FAILED:
+            _lcd.setCursor(0, 1);
+            _lcd.print("Status: MOUNT FAILED");
+
+            _lcd.setCursor(0, 2);
+            if (_sd_format_confirm) {
+                _lcd.print("CONFIRM: Press again");
+            } else {
+                _lcd.print("Card needs format   ");
+            }
+
+            _lcd.setCursor(0, 3);
+            _lcd.print("SELECT = Format Card");
+            break;
+
+        case SD_STATUS_NO_CARD:
+            _lcd.setCursor(0, 1);
+            _lcd.print("Status: No Card     ");
+            _lcd.setCursor(0, 2);
+            _lcd.print("Insert card and     ");
+            _lcd.setCursor(0, 3);
+            _lcd.print("reboot or format    ");
+            break;
+
+        default:
+            _lcd.setCursor(0, 1);
+            _lcd.print("Status: Not Init    ");
+            _lcd.setCursor(0, 2);
+            _lcd.print("                    ");
+            _lcd.setCursor(0, 3);
+            _lcd.print("                    ");
+            break;
+    }
 }
 
 // ============================================================================

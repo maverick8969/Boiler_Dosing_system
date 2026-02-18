@@ -35,6 +35,7 @@ typedef enum {
     SCREEN_NETWORK,         // WiFi/Network status
     SCREEN_MENU,            // Menu display
     SCREEN_HW_CONFIG,       // Hardware configuration (enable/disable devices)
+    SCREEN_SD_CARD,         // SD card status and format
     SCREEN_SELF_TEST,       // POST results display
     SCREEN_COUNT
 } display_screen_t;
@@ -239,11 +240,15 @@ private:
     void drawAlarmsScreen();
     void drawNetworkScreen();
     void drawHWConfigScreen();
+    void drawSDCardScreen();
     void drawSelfTestScreen();
 
     // Hardware config menu state
     uint8_t _hw_config_cursor;          // Currently selected device (0..DEV_COUNT-1)
     bool    _hw_config_editing;         // True when toggling enable/disable
+
+    // SD card format confirmation (two-press safety)
+    bool    _sd_format_confirm;         // True after first SELECT press on mount-failed screen
 
     // LED update methods
     void updatePowerLED();
