@@ -20,6 +20,7 @@ of the Columbia CT-6 Boiler Dosing Controller.
 | `test_fault_scenarios.cpp` | DeviceManager, SelfTest, SensorHealth fault injection (T1-T22) | - |
 | `test_sensor_health_edge_cases.cpp` | SensorHealth edge cases, safe mode transitions (E1-E12) | - |
 | `test_a4988_current_limit.cpp` | A4988 Vref/current limit setup, stall testing | - |
+| `test_blowdown_valve.cpp` | Blowdown valve relay control, 4-20mA feedback via ADS1115 | - |
 
 ## Building with PlatformIO
 
@@ -62,6 +63,7 @@ pio run -e test_stepper_pumps -t upload -t monitor
 [env:test_sensor_health_edge_cases]    # Sensor health edge cases (E1-E12)
 [env:test_ezo_ds18b20]                # EZO-EC + DS18B20 (no MAX31865 needed)
 [env:test_a4988_current_limit]        # A4988 Vref/current limit setup
+[env:test_blowdown_valve]             # Blowdown valve relay + 4-20mA feedback
 ```
 
 ## Usage Instructions
@@ -199,6 +201,20 @@ Guides the user through setting the A4988 current limit via the Vref potentiomet
 
 **Procedure:** Select board type (`r`) -> Calculate target Vref (`V`) -> Enable drivers (`e`) ->
 Slow step (`1`/`2`/`3`) while adjusting pot -> Verify with stall test (`4`/`5`/`6`).
+
+### test_blowdown_valve.cpp
+
+Tests the Assured Automation E26NRXS4UV-EP420C blowdown ball valve:
+- SPDT relay control on GPIO4 (4mA closed / 20mA open via resistor select)
+- ADS1115 16-bit ADC reads 4-20mA position feedback (150 ohm sense resistor)
+- Open/close with real-time feedback tracking and position confirmation
+- Full cycle test with automatic timing measurement
+- Continuous feedback monitor mode (500ms updates)
+- I2C bus scan to locate ADS1115
+- Fault detection for wiring issues or stuck valve
+
+**Wiring:** GPIO4 -> MOSFET -> relay coil. Relay NC -> 3.3k (4mA closed).
+Relay NO -> 680 ohm (20mA open). Actuator feedback -> 150 ohm -> ADS1115 CH0.
 
 ## Pin Definitions
 
