@@ -17,6 +17,10 @@
 #include <ArduinoJson.h>
 #include "config.h"
 #include "fuzzy_logic.h"
+#include "device_manager.h"
+#include "sensor_health.h"
+#include "self_test.h"
+#include "sd_logger.h"
 
 // ============================================================================
 // CONFIGURATION
@@ -99,6 +103,9 @@ private:
     void handleRoot();
     void handleGetStatus();
     void handleGetFuzzy();
+    void handleGetDevices();
+    void handleGetSDStatus();
+    void handlePostSDFormat();
     void handlePostTest();
     void handleGetTests();
     void handleClearTests();

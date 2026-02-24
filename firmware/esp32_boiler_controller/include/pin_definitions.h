@@ -11,8 +11,10 @@
  * - 20x4 LCD Display (I2C)
  * - WS2812 RGB LED Strip for Status Indicators
  * - Sensorex CS675HTTC/P1K Conductivity Probe via Atlas Scientific EZO-EC (UART)
- * - PT1000 RTD Temperature Sensor via Adafruit MAX31865 (SPI)
- * - Automated Blowdown Valve (Relay Output)
+ * - PT1000 RTD Temperature Sensor via Adafruit MAX31865 (VSPI, shared bus)
+ * - Micro-SD Card Data Logger (VSPI, shared bus with MAX31865)
+ * - Feedwater Pump Monitor via PC817 Optocoupler (GPIO35)
+ * - Automated Blowdown Valve (Assured Automation E26NRXS4UV-EP420C, 4-20mA)
  *
  * Based on CNC Shield V4.0 architecture adapted for ESP32
  */
@@ -28,7 +30,10 @@
 // Using CNC Shield style pinout adapted for ESP32
 
 // Stepper 1: Hydrogen Sulfite Pump (X-axis on CNC Shield)
-#define STEPPER1_STEP_PIN       GPIO_NUM_12   // X.STEP
+// IMPORTANT: GPIO12 is a strapping pin (selects flash voltage at boot).
+// An external 10k pull-down resistor to GND is REQUIRED on this pin to
+// guarantee LOW at boot (3.3V flash). See Design Notes in schematic doc.
+#define STEPPER1_STEP_PIN       GPIO_NUM_12   // X.STEP (10k pull-down required!)
 #define STEPPER1_DIR_PIN        GPIO_NUM_14   // X.DIR
 #define STEPPER1_ENABLE_PIN     GPIO_NUM_13   // Common Enable (active LOW)
 #define STEPPER1_NAME           "H2SO3"
@@ -93,16 +98,32 @@
 #define COND_RANGE_MAX          10000         // Maximum range (uS/cm)
 
 // ============================================================================
-// BLOWDOWN VALVE CONTROL
+// BLOWDOWN VALVE CONTROL (Assured Automation E26NRXS4UV-EP420C)
 // ============================================================================
-// Relay output for motorized ball valve or solenoid
+// 1" SS ball valve with S4UV actuator and DPS 4-20mA positioner (fail-closed)
+//
+// Control: SPDT relay selects between two resistors to generate 4mA (closed)
+//          or 20mA (open) from the 24VDC supply into the actuator's DPS input.
+//          GPIO4 drives the relay coil via MOSFET:
+//            LOW  = relay de-energized (NC) = R_close selected = ~4mA  = CLOSED
+//            HIGH = relay energized (NO)    = R_open selected  = ~20mA = OPEN
+//
+// Feedback: Actuator outputs 4-20mA position signal read via ADS1115 external
+//           ADC (I2C). 150 ohm sense resistor converts to 0.6-3.0V.
 
-#define BLOWDOWN_RELAY_PIN      GPIO_NUM_4    // Relay driver output
-#define BLOWDOWN_NC_PIN         GPIO_NUM_4    // Normally Closed contact
-// Note: GPIO16 repurposed for MAX31865 CS. Dual relay output no longer available.
+#define BLOWDOWN_RELAY_PIN      GPIO_NUM_4    // SPDT relay coil (via MOSFET)
 
-// Ball Valve Timing (for motorized actuators)
-#define BALL_VALVE_DELAY_DEFAULT    8         // Default delay in seconds (Worcester style)
+// 4-20mA Position Feedback via ADS1115 (I2C external ADC)
+#define BLOWDOWN_FEEDBACK_ADS_CH    0         // ADS1115 channel 0 for feedback
+#define BLOWDOWN_FEEDBACK_R_SENSE   150.0     // Sense resistor (ohms)
+
+// 4-20mA Current Thresholds for binary position detection
+#define BLOWDOWN_MA_CLOSED_MAX      5.0       // Below this = confirmed closed
+#define BLOWDOWN_MA_OPEN_MIN        19.0      // Above this = confirmed open
+#define BLOWDOWN_MA_FAULT_LOW       3.0       // Below this = wiring fault
+
+// Ball Valve Timing (S4 actuator: 14-30 sec per 90 degrees)
+#define BALL_VALVE_DELAY_DEFAULT    20        // Default delay in seconds (S4 actuator)
 #define BALL_VALVE_DELAY_MAX        99        // Maximum configurable delay
 
 // ============================================================================
@@ -138,12 +159,17 @@
 #define LED_BRIGHTNESS          128
 
 // ============================================================================
-// FLOW SWITCH INPUT
+// FEEDWATER PUMP MONITOR (110VAC → optocoupler → GPIO)
 // ============================================================================
-// Digital input for flow switch (disables outputs on no flow)
+// Monitors the CT-6 boiler feedwater pump contactor via PC817 optocoupler.
+// The pump-on indicator light (110VAC) drives the optocoupler's LED through
+// series resistors (2x 33kΩ ½W + 1N4007 reverse protection). The phototransistor
+// pulls GPIO35 LOW when the pump is running.
+// Tracks: cycle count, per-cycle duration, cumulative on-time.
 
-#define FLOW_SWITCH_PIN         GPIO_NUM_35   // Input only GPIO
-#define FLOW_SWITCH_ACTIVE      LOW           // Active when flow present
+#define FEEDWATER_PUMP_PIN      GPIO_NUM_35   // Input only GPIO (no internal pull-up)
+#define FEEDWATER_PUMP_ACTIVE   LOW           // Optocoupler pulls LOW when pump ON
+#define FEEDWATER_PUMP_DEBOUNCE_MS  200       // Debounce for contactor chatter
 
 // ============================================================================
 // AUXILIARY DIGITAL INPUTS
@@ -154,55 +180,22 @@
 // Note: GPIO18 repurposed for MAX31865 SCK. Drum level switch 2 no longer available.
 
 // ============================================================================
-// KEYPAD INTERFACE (4x4 Matrix)
-// ============================================================================
-// For local user interface
-
-#define KEYPAD_ROW1_PIN         GPIO_NUM_15
-#define KEYPAD_ROW2_PIN         GPIO_NUM_2
-#define KEYPAD_ROW3_PIN         GPIO_NUM_0
-#define KEYPAD_ROW4_PIN         GPIO_NUM_4    // Shared with blowdown - use alternate config
-
-#define KEYPAD_COL1_PIN         GPIO_NUM_16
-#define KEYPAD_COL2_PIN         GPIO_NUM_17
-#define KEYPAD_COL3_PIN         GPIO_NUM_18
-#define KEYPAD_COL4_PIN         GPIO_NUM_19
-
-// Note: If using full keypad, remap blowdown relay to GPIO_NUM_23
-// Alternative configuration for simpler 4-button interface below
-
-// ============================================================================
-// ROTARY ENCODER INTERFACE (Primary Navigation)
+// ROTARY ENCODER INTERFACE (Primary Navigation + Select/Menu)
 // ============================================================================
 // KY-040 style rotary encoder with push button
 // Uses hardware interrupts for reliable rotation detection
+// Push button serves as select/menu — the only physical button input.
 
 #define ENCODER_PIN_A           GPIO_NUM_15   // CLK - Encoder output A
 #define ENCODER_PIN_B           GPIO_NUM_2    // DT  - Encoder output B
-#define ENCODER_BUTTON_PIN      GPIO_NUM_0    // SW  - Push button (active LOW)
+#define ENCODER_BUTTON_PIN      GPIO_NUM_0    // SW  - Push button (active LOW, select/menu)
 
 // Encoder Configuration
 #define ENCODER_STEPS_PER_NOTCH 4             // Pulses per detent (typical for KY-040)
 #define ENCODER_DEBOUNCE_MS     5             // Debounce time for rotation
 #define ENCODER_BTN_DEBOUNCE_MS 50            // Debounce time for button
-#define ENCODER_LONG_PRESS_MS   1500          // Long press threshold
+#define ENCODER_LONG_PRESS_MS   1500          // Long press threshold (enter menu)
 #define ENCODER_DOUBLE_PRESS_MS 300           // Double press window
-
-// ============================================================================
-// SIMPLIFIED BUTTON INTERFACE (Alternative to rotary encoder)
-// ============================================================================
-// Use these if not using rotary encoder
-
-#define BTN_UP_PIN              GPIO_NUM_15   // Shared with ENCODER_PIN_A
-#define BTN_DOWN_PIN            GPIO_NUM_2    // Shared with ENCODER_PIN_B
-#define BTN_ENTER_PIN           GPIO_NUM_0    // Shared with ENCODER_BUTTON_PIN
-#define BTN_MENU_PIN            GPIO_NUM_19   // Additional menu button (optional)
-
-// ============================================================================
-// WIFI INDICATOR
-// ============================================================================
-
-#define WIFI_STATUS_LED_PIN     GPIO_NUM_2    // Built-in LED on most ESP32 boards
 
 // ============================================================================
 // I2C BUS CONFIGURATION
@@ -212,20 +205,27 @@
 #define I2C_SCL_PIN             GPIO_NUM_22
 #define I2C_FREQ                400000        // 400kHz Fast Mode
 
-// Optional External ADC (ADS1115) for higher precision
+// External ADC (ADS1115) for blowdown valve 4-20mA position feedback
+// Required: all ESP32 ADC1 input-only pins are occupied; ADS1115 provides
+// 16-bit resolution on the shared I2C bus with no additional GPIO needed.
 #define ADS1115_I2C_ADDR        0x48
-#define USE_EXTERNAL_ADC        false         // Set true if using ADS1115
+#define USE_EXTERNAL_ADC        true          // Required for blowdown valve feedback
 
 // ============================================================================
-// SPI BUS (MAX31865 uses software SPI, hardware SPI available for expansion)
+// SPI BUS — Shared VSPI (MAX31865 + SD Card)
 // ============================================================================
-// MAX31865 PT1000 RTD uses software SPI on dedicated pins (see conductivity section)
-// Hardware SPI pins remain available for future expansion (SD card, etc.)
+// Both the MAX31865 PT1000 RTD and SD card module share the ESP32 hardware
+// VSPI bus. Each device has its own CS pin; a FreeRTOS mutex (spiMutex)
+// protects bus access between the Measurement and Logging tasks.
+//
+//   MOSI = GPIO23    (shared)
+//   MISO = GPIO39    (shared, input-only — fine for MISO)
+//   SCK  = GPIO18    (shared)
+//   MAX31865 CS = GPIO16
+//   SD Card  CS = GPIO19
 
-#define SPI_MOSI_PIN            GPIO_NUM_23   // Shared with MAX31865 MOSI
-#define SPI_MISO_PIN            GPIO_NUM_19   // Available for expansion
-#define SPI_SCK_PIN             GPIO_NUM_18   // Shared with MAX31865 SCK
-#define SD_CS_PIN               GPIO_NUM_5    // Conflicts with WS2812 - choose one
+#define SD_CS_PIN               GPIO_NUM_19   // SD card chip select (VSPI)
+#define SD_SPI_FREQ             4000000       // 4 MHz SPI clock for SD card
 
 // ============================================================================
 // PIN VALIDATION
@@ -237,39 +237,42 @@
 // GPIO0: Boot button (use with care)
 // GPIO2: Must be LOW during boot for serial flashing
 
-// Safe output pins: 4, 5, 12, 13, 14, 15, 16, 17, 18, 19, 21, 22, 23, 25, 26, 27, 32, 33
+// Safe output pins: 4, 5, 13, 14, 16, 17, 18, 19, 21, 22, 23, 25, 26, 27, 32, 33
 // Safe input pins: All of above plus 34, 35, 36, 39
+// Caution pins: 12 (strapping, needs external 10k pull-down to GND)
+//               15 (strapping, boot log control — pull-up is OK)
 
 // ============================================================================
 // GPIO SUMMARY TABLE
 // ============================================================================
 /*
-| GPIO | Function              | Direction | Notes                    |
-|------|-----------------------|-----------|--------------------------|
-| 0    | ENCODER_BUTTON        | Input     | Push button (strapping!) |
-| 2    | ENCODER_PIN_B (DT)    | Input     | Encoder output B         |
-| 4    | BLOWDOWN_RELAY        | Output    | Relay driver             |
-| 5    | WS2812_DATA           | Output    | LED strip                |
-| 12   | STEPPER1_STEP         | Output    | H2SO3 pump step          |
-| 13   | STEPPER_ENABLE        | Output    | Common enable (active LOW)|
-| 14   | STEPPER1_DIR          | Output    | H2SO3 pump direction     |
-| 15   | ENCODER_PIN_A (CLK)   | Input     | Encoder output A         |
-| 16   | MAX31865_CS           | Output    | RTD SPI chip select      |
-| 17   | AUX_INPUT1            | Input     | Drum level 1             |
-| 18   | MAX31865_SCK          | Output    | RTD SPI clock            |
-| 19   | BTN_MENU (optional)   | Input     | Extra button             |
-| 21   | I2C_SDA               | I/O       | LCD, sensors             |
-| 22   | I2C_SCL               | Output    | LCD, sensors             |
-| 23   | MAX31865_MOSI         | Output    | RTD SPI data out         |
-| 25   | EZO_EC_TX             | Output    | Atlas EZO-EC UART TX     |
-| 26   | STEPPER2_DIR          | Output    | NaOH pump direction      |
-| 27   | STEPPER2_STEP         | Output    | NaOH pump step           |
-| 32   | STEPPER3_DIR          | Output    | Amine pump direction     |
-| 33   | STEPPER3_STEP         | Output    | Amine pump step          |
-| 34   | WATER_METER           | Input     | Water meter pulses       |
-| 35   | FLOW_SWITCH           | Input     | Flow switch              |
-| 36   | EZO_EC_RX             | Input     | Atlas EZO-EC UART RX     |
-| 39   | MAX31865_MISO         | Input     | RTD SPI data in          |
+| GPIO | Function              | Direction | Notes                              |
+|------|-----------------------|-----------|------------------------------------|
+| 0    | ENCODER_BUTTON (sel)  | Input     | Select/menu (strapping! 10k pull-up)|
+| 2    | ENCODER_PIN_B (DT)    | Input     | Encoder output B (strapping)        |
+| 4    | BLOWDOWN_RELAY        | Output    | SPDT relay for 4-20mA control       |
+| 5    | WS2812_DATA           | Output    | LED strip                           |
+| 12   | STEPPER1_STEP         | Output    | H2SO3 pump step (10k pull-down!)    |
+| 13   | STEPPER_ENABLE        | Output    | Common enable (active LOW)          |
+| 14   | STEPPER1_DIR          | Output    | H2SO3 pump direction                |
+| 15   | ENCODER_PIN_A (CLK)   | Input     | Encoder output A (strapping)        |
+| 16   | MAX31865_CS           | Output    | RTD SPI chip select                 |
+| 17   | AUX_INPUT1            | Input     | Drum level switch                   |
+| 18   | VSPI_SCK              | Output    | Shared SPI clock (MAX31865 + SD)    |
+| 19   | SD_CS                 | Output    | SD card chip select (VSPI)          |
+| 21   | I2C_SDA               | I/O       | LCD + ADS1115                       |
+| 22   | I2C_SCL               | Output    | LCD + ADS1115                       |
+| 23   | VSPI_MOSI             | Output    | Shared SPI data out (MAX31865 + SD) |
+| 25   | EZO_EC_TX             | Output    | Atlas EZO-EC UART TX                |
+| 26   | STEPPER2_DIR          | Output    | NaOH pump direction                 |
+| 27   | STEPPER2_STEP         | Output    | NaOH pump step                      |
+| 32   | STEPPER3_DIR          | Output    | Amine pump direction                |
+| 33   | STEPPER3_STEP         | Output    | Amine pump step                     |
+| 34   | WATER_METER           | Input     | Water meter pulses (input-only)     |
+| 35   | FEEDWATER_PUMP_MON    | Input     | Pump contactor via optocoupler      |
+| 36   | EZO_EC_RX             | Input     | Atlas EZO-EC UART RX (input-only)   |
+| 39   | MAX31865_MISO         | Input     | RTD SPI data in (input-only)        |
+| I2C  | ADS1115 CH0           | Input     | Blowdown valve 4-20mA feedback      |
 */
 
 #endif // PIN_DEFINITIONS_H

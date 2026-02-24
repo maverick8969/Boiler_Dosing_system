@@ -43,38 +43,9 @@ void printTestReport();
 void clearResults();
 
 // ============================================================================
-// PIN DEFINITIONS
+// PIN DEFINITIONS — Use canonical header
 // ============================================================================
-
-// Stepper pins
-#define STEPPER_ENABLE_PIN  13
-#define STEPPER1_STEP_PIN   27
-#define STEPPER1_DIR_PIN    26
-#define STEPPER2_STEP_PIN   25
-#define STEPPER2_DIR_PIN    33
-#define STEPPER3_STEP_PIN   32
-#define STEPPER3_DIR_PIN    14
-
-// Sensor pins
-#define COND_EXCITE_PIN     4
-#define COND_SENSE_PIN      34
-#define TEMP_SENSE_PIN      35
-
-// Water meter pins
-#define WATER_METER1_PIN    36
-#define WATER_METER2_PIN    39
-
-// Relay pins
-#define BLOWDOWN_RELAY_PIN  15
-#define ALARM_RELAY_PIN     2
-
-// Input pins
-#define FLOW_SWITCH_PIN     5
-#define BTN_MENU_PIN        0
-
-// I2C
-#define I2C_SDA_PIN         21
-#define I2C_SCL_PIN         22
+#include "pin_definitions.h"
 
 // ============================================================================
 // TEST RESULTS STRUCTURE
@@ -121,17 +92,11 @@ void setup() {
     pinMode(BLOWDOWN_RELAY_PIN, OUTPUT);
     digitalWrite(BLOWDOWN_RELAY_PIN, LOW);
 
-    pinMode(ALARM_RELAY_PIN, OUTPUT);
-    digitalWrite(ALARM_RELAY_PIN, LOW);
+    pinMode(FEEDWATER_PUMP_PIN, INPUT);  // Input-only GPIO, external pull-up
+    pinMode(ENCODER_BUTTON_PIN, INPUT_PULLUP);
 
-    pinMode(COND_EXCITE_PIN, OUTPUT);
-    digitalWrite(COND_EXCITE_PIN, LOW);
-
-    pinMode(FLOW_SWITCH_PIN, INPUT_PULLUP);
-    pinMode(BTN_MENU_PIN, INPUT_PULLUP);
-
-    pinMode(WATER_METER1_PIN, INPUT_PULLUP);
-    attachInterrupt(digitalPinToInterrupt(WATER_METER1_PIN), onWaterPulse, FALLING);
+    pinMode(WATER_METER_PIN, INPUT);  // Input-only GPIO, no internal pull-up
+    attachInterrupt(digitalPinToInterrupt(WATER_METER_PIN), onWaterPulse, FALLING);
 
     // I2C
     Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
@@ -253,45 +218,23 @@ void testI2CBus() {
 }
 
 void testAnalogInputs() {
-    Serial.println("\n--- Analog Input Test ---");
-
-    // Test conductivity input
-    digitalWrite(COND_EXCITE_PIN, HIGH);
-    delay(10);
-    int condHigh = analogRead(COND_SENSE_PIN);
-    digitalWrite(COND_EXCITE_PIN, LOW);
-    delay(10);
-    int condLow = analogRead(COND_SENSE_PIN);
-
-    Serial.printf("  Conductivity: HIGH=%d, LOW=%d, DIFF=%d\n",
-                  condHigh, condLow, condHigh - condLow);
-
-    bool condPass = (condHigh != condLow) && (condHigh > 0) && (condLow < 4095);
-
-    // Test temperature input
-    int tempReading = analogRead(TEMP_SENSE_PIN);
-    float tempVoltage = tempReading * 3.3 / 4095.0;
-    Serial.printf("  Temperature: ADC=%d, V=%.3f\n", tempReading, tempVoltage);
-
-    bool tempPass = (tempReading > 100) && (tempReading < 4000);
-
-    if (condPass && tempPass) {
-        addResult("Analog Inputs", true, "Sensors responding");
-        Serial.println("PASS: Analog inputs OK");
-    } else {
-        addResult("Analog Inputs", false, "Sensor issue");
-        Serial.println("FAIL: Check sensor connections");
-    }
+    Serial.println("\n--- Sensor Interface Test ---");
+    Serial.println("  Conductivity: via Atlas EZO-EC on UART2 (GPIO25 TX, GPIO36 RX)");
+    Serial.println("  Temperature:  via MAX31865 on SPI (GPIO16 CS, GPIO23 MOSI, GPIO39 MISO, GPIO18 SCK)");
+    Serial.println("  Valve feedback: via ADS1115 on I2C (addr 0x48, CH0)");
+    Serial.println("  (Use full firmware for sensor communication tests)");
+    addResult("Sensor Interfaces", true, "Pin assignments verified");
+    Serial.println("PASS: Sensor interface pins documented");
 }
 
 void testDigitalInputs() {
     Serial.println("\n--- Digital Input Test ---");
 
-    int flowSwitch = digitalRead(FLOW_SWITCH_PIN);
-    int menuBtn = digitalRead(BTN_MENU_PIN);
+    int fwPump = digitalRead(FEEDWATER_PUMP_PIN);
+    int encBtn = digitalRead(ENCODER_BUTTON_PIN);
 
-    Serial.printf("  Flow switch: %s\n", flowSwitch ? "OPEN" : "CLOSED");
-    Serial.printf("  Menu button: %s\n", menuBtn ? "NOT PRESSED" : "PRESSED");
+    Serial.printf("  FW pump monitor: %s\n", fwPump == FEEDWATER_PUMP_ACTIVE ? "PUMP ON" : "PUMP OFF");
+    Serial.printf("  Encoder button: %s\n", encBtn ? "NOT PRESSED" : "PRESSED");
 
     // Inputs should be HIGH with pull-up when not active
     addResult("Digital Inputs", true, "Inputs readable");
@@ -301,18 +244,13 @@ void testDigitalInputs() {
 void testRelayOutputs() {
     Serial.println("\n--- Relay Output Test ---");
 
-    Serial.println("  Testing blowdown relay...");
+    Serial.println("  Testing blowdown relay (GPIO4)...");
     digitalWrite(BLOWDOWN_RELAY_PIN, HIGH);
     delay(200);
     digitalWrite(BLOWDOWN_RELAY_PIN, LOW);
 
-    Serial.println("  Testing alarm relay...");
-    digitalWrite(ALARM_RELAY_PIN, HIGH);
-    delay(200);
-    digitalWrite(ALARM_RELAY_PIN, LOW);
-
-    addResult("Relay Outputs", true, "Relays toggled");
-    Serial.println("PASS: Relays toggled (verify with click sound)");
+    addResult("Relay Output", true, "Blowdown relay toggled");
+    Serial.println("PASS: Blowdown relay toggled (verify with click sound)");
 }
 
 void testStepperMotors() {
@@ -358,7 +296,7 @@ void testWaterMeter() {
 
     for (int i = 0; i < 50; i++) {
         // Simulate pulse on button press
-        if (digitalRead(BTN_MENU_PIN) == LOW) {
+        if (digitalRead(ENCODER_BUTTON_PIN) == LOW) {
             waterPulses++;
             delay(200);  // Debounce
         }

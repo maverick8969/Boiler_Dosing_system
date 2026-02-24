@@ -197,6 +197,7 @@ typedef struct {
     hoa_mode_t hoa_mode;            // Hand-Off-Auto mode
     bool timeout_flag;              // Set when timeout occurs
     uint32_t accumulated_time;      // Total blowdown time (seconds, persistent)
+    bool feedback_enabled;          // Read 4-20mA position feedback from actuator
 } blowdown_config_t;
 
 // Blowdown limits
@@ -207,12 +208,13 @@ typedef struct {
 #define BLOW_TIME_LIMIT_MIN         60      // 1 minute
 #define BLOW_TIME_LIMIT_MAX         32340   // 8:59 hours
 
-// Default blowdown configuration
+// Default blowdown configuration (Assured Automation E26NRXS4UV-EP420C)
 #define BLOW_DEFAULT_SETPOINT       2500    // 2500 uS/cm
 #define BLOW_DEFAULT_DEADBAND       50      // 50 uS/cm
 #define BLOW_DEFAULT_TIME_LIMIT     0       // Unlimited
 #define BLOW_DEFAULT_DIRECTION      0       // HIGH (blowdown above setpoint)
-#define BLOW_DEFAULT_VALVE_DELAY    0       // No delay (solenoid valve)
+#define BLOW_DEFAULT_VALVE_DELAY    20      // S4 actuator cycle time (seconds)
+#define BLOW_DEFAULT_FEEDBACK       true    // Read 4-20mA position feedback
 
 // ============================================================================
 // CHEMICAL PUMP CONFIGURATION STRUCTURE
@@ -309,7 +311,6 @@ typedef struct {
     bool feed_timeout_enabled;
 
     // Safety alarms
-    bool no_flow_enabled;
     bool sensor_error_enabled;
     bool temp_error_enabled;
     bool drum_level_enabled;
@@ -425,6 +426,10 @@ typedef struct {
     int8_t timezone_offset;         // Hours from UTC
     bool dst_enabled;               // Daylight saving time
 
+    // Hardware device enable/disable flags (managed by DeviceManager)
+    uint16_t enabled_devices;       // Bitmask: bit N = device N enabled
+    uint16_t _hw_reserved;          // Alignment padding / future use
+
 } system_config_t;
 
 #define CONFIG_MAGIC                0x43543630  // "CT60" in hex
@@ -482,6 +487,14 @@ typedef struct {
     uint32_t hold_timer;
     uint32_t cycle_position;
 
+    // Feedwater pump monitoring (GPIO35 via optocoupler)
+    bool feedwater_pump_on;             // Current state
+    uint32_t fw_pump_cycle_count;       // Total activation cycles
+    uint32_t fw_pump_on_time_sec;       // Cumulative on-time (seconds)
+    uint32_t fw_pump_current_cycle_ms;  // Current cycle duration (ms)
+    uint32_t fw_pump_last_cycle_sec;    // Duration of last completed cycle (seconds)
+    uint32_t fw_pump_last_on_time;      // millis() when pump last turned on
+
 } system_state_t_runtime;
 
 // ============================================================================
@@ -495,13 +508,16 @@ typedef struct {
 #define ALARM_FEED1_TIMEOUT         0x0008
 #define ALARM_FEED2_TIMEOUT         0x0010
 #define ALARM_FEED3_TIMEOUT         0x0020
-#define ALARM_NO_FLOW               0x0040
+// 0x0040 was ALARM_NO_FLOW (flow switch removed; GPIO35 repurposed for feedwater pump monitor)
 #define ALARM_SENSOR_ERROR          0x0080
 #define ALARM_TEMP_ERROR            0x0100
 #define ALARM_DRUM_LEVEL_1          0x0200
 #define ALARM_DRUM_LEVEL_2          0x0400
 #define ALARM_WIFI_DISCONNECT       0x0800
 #define ALARM_CALIBRATION_DUE       0x1000
+#define ALARM_VALVE_FAULT           0x2000
+#define ALARM_STALE_DATA            0x4000
+#define ALARM_SAFE_MODE             0x8000
 
 // ============================================================================
 // NVS STORAGE KEYS
@@ -516,6 +532,8 @@ typedef struct {
 #define NVS_KEY_PUMP3_TOTAL         "pump3_tot"
 #define NVS_KEY_BLOW_TOTAL          "blow_total"
 #define NVS_KEY_LAST_CAL_DATE       "last_cal"
+#define NVS_KEY_FW_PUMP_CYCLES      "fw_cycles"   // Feedwater pump activation count
+#define NVS_KEY_FW_PUMP_ONTIME      "fw_ontime"   // Feedwater pump cumulative on-time (sec)
 
 // ============================================================================
 // FREERTOS TASK CONFIGURATION

@@ -366,10 +366,23 @@ String DataLogger::buildReadingJSON(sensor_reading_t* reading) {
     doc["water_meter2"] = reading->water_meter2;
     doc["flow_rate"] = reading->flow_rate;
     doc["blowdown_active"] = reading->blowdown_active;
+    doc["valve_position_mA"] = reading->valve_position_mA;
     doc["pump1_active"] = reading->pump1_active;
     doc["pump2_active"] = reading->pump2_active;
     doc["pump3_active"] = reading->pump3_active;
+    doc["feedwater_pump_on"] = reading->feedwater_pump_on;
+    doc["fw_pump_cycle_count"] = reading->fw_pump_cycle_count;
+    doc["fw_pump_on_time_sec"] = reading->fw_pump_on_time_sec;
     doc["active_alarms"] = reading->active_alarms;
+
+    // Health & diagnostics
+    doc["safe_mode"] = reading->safe_mode;
+    doc["cond_sensor_valid"] = reading->cond_sensor_valid;
+    doc["temp_sensor_valid"] = reading->temp_sensor_valid;
+    doc["devices_operational"] = reading->devices_operational;
+    doc["devices_faulted"] = reading->devices_faulted;
+    doc["devices_faulted_mask"] = reading->devices_faulted_mask;
+    doc["measurement_age_ms"] = reading->measurement_age_ms;
 
     String output;
     serializeJson(doc, output);

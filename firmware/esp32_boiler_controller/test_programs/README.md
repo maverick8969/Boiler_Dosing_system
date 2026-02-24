@@ -14,6 +14,7 @@ of the Columbia CT-6 Boiler Dosing Controller.
 | `test_wifi_api.cpp` | WiFi connection, HTTP client, API posting | ArduinoJson |
 | `test_fuzzy_logic.cpp` | Membership functions, rule evaluation, scenarios | - |
 | `test_gpio_pins.cpp` | All GPIO pins, I2C scan, relay/stepper tests | - |
+| `test_ezo_conductivity.cpp` | Atlas Scientific EZO-EC UART, PT1000 RTD via MAX31865 | Adafruit_MAX31865 |
 | `test_integration.cpp` | Full system integration test with simulation | - |
 
 ## Building with PlatformIO
@@ -51,6 +52,7 @@ pio run -e test_stepper_pumps -t upload -t monitor
 [env:test_wifi_api]            # WiFi and API test
 [env:test_fuzzy_logic]         # Fuzzy logic controller test
 [env:test_gpio_pins]           # GPIO pin test
+[env:test_ezo_conductivity]    # EZO-EC + PT1000 RTD test
 [env:test_integration]         # Full integration test
 ```
 
@@ -116,6 +118,14 @@ Tests the fuzzy logic controller:
 - Input/output visualization
 - Preset test scenarios
 
+### test_ezo_conductivity.cpp
+
+Tests the Atlas Scientific EZO-EC conductivity circuit and Adafruit MAX31865 PT1000 RTD:
+- EZO-EC UART communication (Serial2, 9600 baud)
+- EZO command interface (R, Cal, T, K, Status, etc.)
+- PT1000 RTD temperature reading via software SPI
+- Temperature-compensated conductivity readings
+
 ### test_gpio_pins.cpp
 
 Tests all GPIO pins for hardware verification:
@@ -135,8 +145,8 @@ Full system integration test:
 
 ## Pin Definitions
 
-Each test program includes its own pin definitions that match the main firmware.
-If your hardware differs, edit the `#define` statements at the top of each file.
+Test programs use `#include "pin_definitions.h"` from the main firmware for canonical
+pin assignments. If your hardware differs, edit that header — changes propagate to all tests.
 
 ## Troubleshooting
 

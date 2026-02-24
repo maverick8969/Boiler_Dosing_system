@@ -108,7 +108,7 @@ Real-time display screens (rotate encoder to cycle through):
 │  === Water Meters ===                                               │
 │  WM1: 12,345 gal  2.5 GPM                                          │
 │  WM2: Disabled                                                     │
-│  Flow Switch: OK                                                   │
+│  FW Pump: OFF  Cycles: 1,204  On: 18.3 hr                          │
 └─────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -310,7 +310,7 @@ Real-time display screens (rotate encoder to cycle through):
 ├─────────────────────────────────────────────────────────────────────┤
 │  5.1 Water Meter 1    >  │  WM1 configuration                      │
 │  5.2 Water Meter 2    >  │  WM2 configuration                      │
-│  5.3 Flow Switch      >  │  Flow switch settings                   │
+│  5.3 FW Pump Stats    >  │  Feedwater pump cycle count + on-time   │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -369,7 +369,7 @@ Real-time display screens (rotate encoder to cycle through):
 ┌─────────────────────────────────────────────────────────────────────┐
 │ 6.5 SAFETY ALARMS                                                   │
 ├─────────────────────────────────────────────────────────────────────┤
-│  No Flow:       [ENABLED]       │  Alarm on flow switch open       │
+│  Valve Fault:   [ENABLED]       │  Alarm on blowdown valve fault   │
 │  Sensor Error:  [ENABLED]       │  Alarm on conductivity fault     │
 │  Temp Error:    [ENABLED]       │  Alarm on temperature fault      │
 │  Drum Level 1:  [ENABLED]       │  Alarm on aux input 1            │

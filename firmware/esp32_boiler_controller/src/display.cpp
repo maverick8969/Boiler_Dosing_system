@@ -9,6 +9,10 @@
 #include "water_meter.h"
 #include "blowdown.h"
 #include "data_logger.h"
+#include "device_manager.h"
+#include "sensor_health.h"
+#include "self_test.h"
+#include "sd_logger.h"
 #include <stdarg.h>
 
 // Global instance
@@ -73,6 +77,9 @@ Display::Display()
     , _alarm_active(false)
     , _alarm_flash_state(false)
     , _alarm_flash_time(0)
+    , _hw_config_cursor(0)
+    , _hw_config_editing(false)
+    , _sd_format_confirm(false)
 {
     memset(_message_line1, 0, sizeof(_message_line1));
     memset(_message_line2, 0, sizeof(_message_line2));
@@ -177,6 +184,15 @@ void Display::update() {
         case SCREEN_NETWORK:
             drawNetworkScreen();
             break;
+        case SCREEN_HW_CONFIG:
+            drawHWConfigScreen();
+            break;
+        case SCREEN_SD_CARD:
+            drawSDCardScreen();
+            break;
+        case SCREEN_SELF_TEST:
+            drawSelfTestScreen();
+            break;
         default:
             break;
     }
@@ -190,11 +206,13 @@ void Display::setScreen(display_screen_t screen) {
 }
 
 void Display::nextScreen() {
+    _sd_format_confirm = false;
     _current_screen = (display_screen_t)((_current_screen + 1) % SCREEN_COUNT);
     _lcd.clear();
 }
 
 void Display::prevScreen() {
+    _sd_format_confirm = false;
     if (_current_screen == 0) {
         _current_screen = (display_screen_t)(SCREEN_COUNT - 1);
     } else {
@@ -430,20 +448,30 @@ void Display::drawBlowdownScreen() {
     blowdown_status_t status = blowdownController.getStatus();
 
     _lcd.setCursor(0, 0);
-    _lcd.print("=== Blowdown ===");
+    _lcd.print("=== Blowdown ===    ");
 
+    // Line 1: Valve state + feedback current
     _lcd.setCursor(0, 1);
-    snprintf(line, sizeof(line), "State: %s",
-             status.valve_open ? "OPEN" : "CLOSED");
+    if (status.feedback_mA > 0.1) {
+        snprintf(line, sizeof(line), "%-8s %5.1f mA",
+                 status.valve_open ? "OPEN" : "CLOSED",
+                 status.feedback_mA);
+    } else {
+        snprintf(line, sizeof(line), "%-8s  no fbk ",
+                 status.valve_open ? "OPEN" : "CLOSED");
+    }
     _lcd.print(line);
 
+    // Line 2: Current blowdown time + fault indicator
     _lcd.setCursor(0, 2);
-    snprintf(line, sizeof(line), "Time: %lu sec",
-             status.current_blowdown_time / 1000);
+    snprintf(line, sizeof(line), "Time: %lu sec %s    ",
+             status.current_blowdown_time / 1000,
+             status.valve_fault ? "FLT" : "");
     _lcd.print(line);
 
+    // Line 3: Daily total
     _lcd.setCursor(0, 3);
-    snprintf(line, sizeof(line), "Total: %lu sec",
+    snprintf(line, sizeof(line), "Total: %lu sec      ",
              status.total_blowdown_time);
     _lcd.print(line);
 }
@@ -540,8 +568,13 @@ void Display::drawNetworkScreen() {
 // ============================================================================
 
 void Display::updatePowerLED() {
-    // Green when OK, red on any error
-    _leds[LED_POWER] = COLOR_GREEN;
+    if (sensorHealth.isInSafeMode()) {
+        _leds[LED_POWER] = COLOR_RED;
+    } else if (deviceManager.countFaulted() > 0) {
+        _leds[LED_POWER] = COLOR_ORANGE;
+    } else {
+        _leds[LED_POWER] = COLOR_GREEN;
+    }
 }
 
 void Display::updateWiFiLED() {
@@ -642,5 +675,195 @@ CRGB Display::conductivityToColor(float value, float setpoint, float deadband) {
         return COLOR_BLUE;
     } else {
         return COLOR_GREEN;
+    }
+}
+
+// ============================================================================
+// MENU METHODS
+// ============================================================================
+
+void Display::toggleMenu() {
+    if (_current_screen == SCREEN_HW_CONFIG || _current_screen == SCREEN_MENU
+        || _current_screen == SCREEN_SD_CARD) {
+        // Exit menu → return to main screen
+        _hw_config_editing = false;
+        _sd_format_confirm = false;
+        setScreen(SCREEN_MAIN);
+    } else {
+        // Enter menu → go to HW config
+        _hw_config_cursor = 0;
+        _hw_config_editing = false;
+        _sd_format_confirm = false;
+        setScreen(SCREEN_HW_CONFIG);
+    }
+}
+
+void Display::select() {
+    if (_current_screen == SCREEN_HW_CONFIG) {
+        // Toggle enable/disable for the highlighted device
+        device_id_t id = (device_id_t)_hw_config_cursor;
+        if (!deviceManager.isRequired(id)) {
+            bool new_state = !deviceManager.isEnabled(id);
+            deviceManager.setEnabled(id, new_state);
+        } else {
+            showMessage("Required Device", "Cannot disable");
+        }
+    } else if (_current_screen == SCREEN_SD_CARD) {
+        sd_card_status_t status = sdLogger.getCardStatus();
+        if (status == SD_STATUS_MOUNT_FAILED || status == SD_STATUS_NO_CARD) {
+            if (_sd_format_confirm) {
+                // Second press — actually format
+                _sd_format_confirm = false;
+                showMessage("Formatting SD...", "Please wait", 10000);
+                bool ok = sdLogger.formatCard();
+                if (ok) {
+                    deviceManager.setInstalled(DEV_SD_CARD, true);
+                    showMessage("SD Format OK", "Card is ready");
+                } else {
+                    showMessage("SD Format FAILED", "Check card");
+                }
+            } else {
+                // First press — ask for confirmation
+                _sd_format_confirm = true;
+            }
+        }
+    }
+}
+
+// ============================================================================
+// HARDWARE CONFIG SCREEN
+// ============================================================================
+
+void Display::drawHWConfigScreen() {
+    char line[21];
+
+    // Title bar with cursor position
+    snprintf(line, sizeof(line), "= HW Config %2d/%d =",
+             _hw_config_cursor + 1, DEV_COUNT);
+    _lcd.setCursor(0, 0);
+    _lcd.print(line);
+
+    // Show current device
+    device_id_t id = (device_id_t)_hw_config_cursor;
+    const device_info_t* info = deviceManager.getDeviceInfo(id);
+    if (!info) return;
+
+    // Line 2: Device name
+    snprintf(line, sizeof(line), "%-20s", info->name);
+    _lcd.setCursor(0, 1);
+    _lcd.print(line);
+
+    // Line 3: Enabled/Required status
+    if (info->required) {
+        snprintf(line, sizeof(line), "State: REQUIRED     ");
+    } else if (info->enabled) {
+        snprintf(line, sizeof(line), "State: Enabled      ");
+    } else {
+        snprintf(line, sizeof(line), "State: Disabled     ");
+    }
+    _lcd.setCursor(0, 2);
+    _lcd.print(line);
+
+    // Line 4: Runtime status
+    const char* state_str = deviceManager.getStateString(id);
+    snprintf(line, sizeof(line), "Status: %-12s", state_str);
+    _lcd.setCursor(0, 3);
+    _lcd.print(line);
+}
+
+// ============================================================================
+// SD CARD SCREEN
+// ============================================================================
+
+void Display::drawSDCardScreen() {
+    char line[21];
+    sd_card_status_t status = sdLogger.getCardStatus();
+
+    _lcd.setCursor(0, 0);
+    _lcd.print("==== SD Card ====   ");
+
+    switch (status) {
+        case SD_STATUS_OK: {
+            uint32_t sizeMB = sdLogger.getCardSizeMB();
+            uint32_t usedMB = sdLogger.getUsedSpaceMB();
+
+            snprintf(line, sizeof(line), "Size: %5lu MB      ", sizeMB);
+            _lcd.setCursor(0, 1);
+            _lcd.print(line);
+
+            snprintf(line, sizeof(line), "Used: %5lu MB      ", usedMB);
+            _lcd.setCursor(0, 2);
+            _lcd.print(line);
+
+            snprintf(line, sizeof(line), "Records: %lu        ", sdLogger.getRecordsToday());
+            _lcd.setCursor(0, 3);
+            _lcd.print(line);
+            break;
+        }
+
+        case SD_STATUS_MOUNT_FAILED:
+            _lcd.setCursor(0, 1);
+            _lcd.print("Status: MOUNT FAILED");
+
+            _lcd.setCursor(0, 2);
+            if (_sd_format_confirm) {
+                _lcd.print("CONFIRM: Press again");
+            } else {
+                _lcd.print("Card needs format   ");
+            }
+
+            _lcd.setCursor(0, 3);
+            _lcd.print("SELECT = Format Card");
+            break;
+
+        case SD_STATUS_NO_CARD:
+            _lcd.setCursor(0, 1);
+            _lcd.print("Status: No Card     ");
+            _lcd.setCursor(0, 2);
+            _lcd.print("Insert card and     ");
+            _lcd.setCursor(0, 3);
+            _lcd.print("reboot or format    ");
+            break;
+
+        default:
+            _lcd.setCursor(0, 1);
+            _lcd.print("Status: Not Init    ");
+            _lcd.setCursor(0, 2);
+            _lcd.print("                    ");
+            _lcd.setCursor(0, 3);
+            _lcd.print("                    ");
+            break;
+    }
+}
+
+// ============================================================================
+// SELF-TEST RESULTS SCREEN
+// ============================================================================
+
+void Display::drawSelfTestScreen() {
+    char line[21];
+
+    self_test_result_t result = selfTest.getLastResult();
+
+    _lcd.setCursor(0, 0);
+    _lcd.print("== Self-Test ==");
+
+    snprintf(line, sizeof(line), "Pass: %d  Fail: %d",
+             result.total_passed, result.total_failed);
+    _lcd.setCursor(0, 1);
+    _lcd.print(line);
+
+    snprintf(line, sizeof(line), "Skip: %d  Total: %d",
+             result.total_skipped, result.total_tested);
+    _lcd.setCursor(0, 2);
+    _lcd.print(line);
+
+    _lcd.setCursor(0, 3);
+    if (result.critical_failure) {
+        _lcd.print("** CRITICAL FAIL ** ");
+    } else if (result.total_failed > 0) {
+        _lcd.print("Optional dev missing");
+    } else {
+        _lcd.print("All systems OK      ");
     }
 }

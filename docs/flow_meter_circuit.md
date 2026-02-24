@@ -1,15 +1,13 @@
-'blowdown valve electrical design and documentation
-
-# Dry Contact Flow Meter Pulse Protection  
-## ESP32 (GPIO20) – Low-Frequency Application
+# Dry Contact Flow Meter Pulse Protection
+## ESP32 (GPIO34) – Low-Frequency Application
 
 ### Application Summary
 - **Sensor type:** Dry contact (reed / switch)
-- **Pulse rate:** 1 pulse per gallon  
-- **Flow volume:** ~125 gallons/day  
+- **Pulse rate:** 1 pulse per gallon
+- **Flow volume:** ~125 gallons/day
 - **Pulse frequency:** ~0.00145 Hz (extremely slow)
 - **MCU:** ESP32 (3.3 V logic)
-- **GPIO used:** GPIO20
+- **GPIO used:** GPIO34 (input-only, ADC1_CH6)
 - **Cable length:** ~15 ft
 - **Cable type:** Shielded, signal-only run (no shared conduit with power)
 
@@ -31,7 +29,7 @@
       │
     R1 10 kΩ   (pull-up)
       │
-      ●─────────────── GPIO20  (ESP32)
+      ●─────────────── GPIO34  (ESP32)
       │
     C1 0.1 µF
       │
@@ -111,10 +109,11 @@ This guarantees:
 
 ---
 
-## GPIO20 Notes (ESP32)
-- Safe GPIO for input
-- Not a boot-strap pin
-- No special reset behavior
+## GPIO34 Notes (ESP32)
+- Input-only GPIO (no output capability)
+- No internal pull-up or pull-down — the external 10 kΩ pull-up (R1) is required
+- Not a boot-strap pin; no special reset behavior
+- ADC1 channel 6 — no conflict with WiFi (ADC2 has WiFi conflicts)
 - Suitable for polling or interrupts
 
 ---
@@ -139,6 +138,3 @@ No isolation, comparators, or level shifting required given:
 - **Long outdoor runs / mixed power conduit:** add TVS or optocoupler
 - **Higher pulse rates:** reduce C1 (e.g., 1–10 nF)
 - **Severe EMI:** add Schmitt trigger buffer (74LVC1G17)
-
----
-

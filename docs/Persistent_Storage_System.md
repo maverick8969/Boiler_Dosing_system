@@ -135,12 +135,6 @@ bool isConfigValid(system_config_t* config) {
 | `blow_total` | uint32 | 4 bytes | Total blowdown time (seconds) |
 | `last_cal` | uint32 | 4 bytes | Last calibration timestamp |
 
-### Event Counters
-| Key | Type | Size | Description |
-|-----|------|------|-------------|
-| `boot_count` | uint32 | 4 bytes | Number of boots |
-| `alarm_count` | uint32 | 4 bytes | Total alarm events |
-
 ---
 
 ## Implementation Code
