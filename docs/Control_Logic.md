@@ -24,8 +24,9 @@ the source files in `firmware/esp32_boiler_controller/`.
 │  ├─────────────────────────┤         ┌─────────────────────────┐   │
 │  │ taskMeasurementLoop     │         │ taskLoggingLoop (pri 1) │   │
 │  │   (pri 3)  500 ms       │         │   1000 ms period        │   │
-│  │   EZO-EC, MAX31865,     │         │   WiFi, HTTP POST to    │   │
-│  │   water meter update    │         │   TimescaleDB           │   │
+│  │   EZO-EC, MAX31865,     │         │   WiFi AP+STA dual mode │   │
+│  │   water meter update    │         │   TimescaleDB + Web UI  │   │
+│  │                         │         │   SD card logger        │   │
 │  └─────────────────────────┘         └─────────────────────────┘   │
 │                                                                     │
 │  Arduino loop()  ← processInputs() (encoder polling, 10 ms yield)  │
@@ -49,7 +50,9 @@ the source files in `firmware/esp32_boiler_controller/`.
 | `include/water_meter.h` / `src/water_meter.cpp` | `WaterMeter`, `WaterMeterManager` — pulse counting, flow rate, NVS persistence |
 | `include/fuzzy_logic.h` / `src/fuzzy_logic.cpp` | `FuzzyController` — Mamdani inference, membership functions, rule base |
 | `include/display.h` / `src/display.cpp` | `Display` — LCD screens, WS2812 LEDs, bar graphs |
-| `include/data_logger.h` / `src/data_logger.cpp` | `DataLogger` — WiFi, HTTP POST, buffered uploads, NTP sync |
+| `include/data_logger.h` / `src/data_logger.cpp` | `DataLogger` — WiFi AP+STA, HTTP POST, buffered uploads, NTP sync |
+| `include/sd_logger.h` / `src/sd_logger.cpp` | `SDLogger` — SD card CSV logging, daily file rotation, SPI mutex |
+| `include/web_server.h` / `src/web_server.cpp` | `BoilerWebServer` — REST API + mobile web UI for manual test input |
 
 ---
 
@@ -91,7 +94,14 @@ blowdownController.begin()              ← GPIO4 OUTPUT LOW, ADS1115 probe
   └── configure(blowdown) + setConductivityConfig(conductivity)
        │
        ▼
-dataLogger.begin()                       ← WiFi connect (if SSID set), NTP sync
+dataLogger.begin()                       ← WiFi AP+STA connect, NTP sync
+  └── connectWiFi()                      ← AP starts immediately; STA joins plant network
+       │
+       ▼
+webServer.begin()                        ← HTTP server on port 80 (AP + STA)
+       │
+       ▼
+sdLogger.begin()                         ← SD card on shared VSPI bus (GPIO19 CS)
        │
        ▼
 xTaskCreatePinnedToCore × 4             ← Control, Measurement, Display, Logging
@@ -107,7 +117,7 @@ loop() runs  ← processInputs() every 10 ms
 | **Control** | 1 | 100 ms | 4 KiB | 4 | Blowdown update, fuzzy evaluate, pump feed modes, pump stepper update, alarm check |
 | **Measurement** | 1 | 500 ms | 6 KiB | 3 | EZO-EC read (with RT temp comp), water meter update, system state update |
 | **Display** | 0 | 200 ms | 4 KiB | 2 | LCD screen draw, WS2812 LED update |
-| **Logging** | 0 | 1000 ms | 8 KiB | 1 | WiFi reconnect, periodic `logSensorData()` at `log_interval_ms` |
+| **Logging** | 0 | 1000 ms | 8 KiB | 1 | WiFi STA reconnect, web server handleClient, SD flush, periodic `logSensorData()` |
 
 ### 3. `loop()` — Input Polling (`main.cpp:218`)
 
@@ -472,11 +482,14 @@ Every 1000 ms:
 
 ```
 dataLogger.update()
-  ├── handleWiFiEvents()          ← auto-reconnect if disconnected
+  ├── handleWiFiEvents()          ← STA auto-reconnect (AP stays active)
   └── uploadBuffered()            ← drain circular buffer (100 slots)
 
 sdLogger.update()
   └── flush() every 30 seconds    ← write pending SD data to card
+
+webServer.handleClient()            ← service HTTP requests from AP or STA clients
+webServer.updateReadings(...)       ← push live sensor values to web UI cache
 
 if (millis() - lastLogTime >= log_interval_ms):
   logSensorData()
@@ -511,6 +524,34 @@ Measurement task (Core 1, 2 Hz):
 Logging task (Core 0, 1 Hz):
   sdLogger.logReading()    → takeSPI() → SD write → giveSPI()
 ```
+
+### WiFi Dual-Mode Architecture (AP+STA)
+
+The ESP32 runs in `WIFI_AP_STA` mode, operating both interfaces simultaneously:
+
+```
+                          ┌──────────────────────────┐
+     Plant WiFi (STA)     │      ESP32 Controller    │    Local Hotspot (AP)
+   ◄─────────────────────►│                          │◄─────────────────────►
+   TimescaleDB uploads    │  AP_STA dual mode        │  "BoilerController-Setup"
+   NTP time sync          │  Web server on port 80   │  192.168.4.1
+   Remote Grafana access  │  Serves both interfaces  │  Operator phone/tablet
+                          └──────────────────────────┘
+```
+
+| Interface | Purpose | IP | Notes |
+|-----------|---------|------|-------|
+| **STA** | Plant network → DB uploads, NTP | DHCP assigned | Auto-reconnects on drop; AP unaffected |
+| **AP** | Local web UI for operators | 192.168.4.1 | Always active; password: `boiler2024` |
+
+The web UI (served on both interfaces) provides:
+- Live sensor readings (temperature, conductivity)
+- Manual water test entry (TDS, alkalinity, sulfite, pH)
+- Fuzzy logic control output visualization
+- Real-time 5-second polling with toast notifications
+
+**Fallback:** If STA cannot connect (no plant WiFi configured or out of range),
+the AP still runs, allowing local web access and SD card logging.
 
 ### Logged Fields
 
@@ -672,6 +713,6 @@ Control Task    FuzzyController    PumpManager       ChemicalPump[i]    AccelSte
 | **Pump** | Runtime exceeds `time_limit_seconds` | Pump stopped → `PUMP_STATE_LOCKED_OUT` → `ALARM_FEEDn_TIMEOUT` |
 | **FW Pump Monitor** | GPIO35 via optocoupler | Logs `FW_PUMP_ON`/`FW_PUMP_OFF` events; tracks cycle count + on-time in NVS |
 | **Drum level** | AUX_INPUT1 (GPIO17) LOW | `ALARM_DRUM_LEVEL_1` |
-| **WiFi** | Disconnect detected | `dataLogger` auto-reconnects; readings buffered (100 slots) |
+| **WiFi STA** | Disconnect detected | STA auto-reconnects; AP + web UI stay active; readings buffered (100 slots) + SD card |
 | **NVS** | Config load fails validation | Factory defaults loaded; `saveConfiguration()` called |
 | **HOA HAND** | 10-minute timeout | Auto-reverts to `HOA_AUTO` |

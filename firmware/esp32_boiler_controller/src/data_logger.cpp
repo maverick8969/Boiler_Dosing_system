@@ -59,14 +59,22 @@ bool DataLogger::connectWiFi() {
 
     Serial.printf("DataLogger: Connecting to WiFi '%s'...\n", _config->wifi_ssid);
 
-    WiFi.mode(WIFI_STA);
+    // Use AP_STA dual mode: station connects to plant WiFi for DB uploads,
+    // AP provides local hotspot (192.168.4.1) for the web UI simultaneously.
+    WiFi.mode(WIFI_AP_STA);
+    WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASS, WIFI_AP_CHANNEL);
     WiFi.setHostname(WIFI_HOSTNAME);
     WiFi.begin(_config->wifi_ssid, _config->wifi_password);
+
+    _ap_mode = true;  // AP is always active in dual mode
+
+    Serial.printf("DataLogger: AP started — SSID: %s, IP: %s\n",
+                  WIFI_AP_SSID, WiFi.softAPIP().toString().c_str());
 
     uint32_t start_time = millis();
     while (WiFi.status() != WL_CONNECTED) {
         if (millis() - start_time >= WIFI_CONNECT_TIMEOUT_MS) {
-            Serial.println("DataLogger: WiFi connection timeout");
+            Serial.println("DataLogger: STA connection timeout (AP still active)");
             return false;
         }
         delay(500);
@@ -74,7 +82,7 @@ bool DataLogger::connectWiFi() {
     }
 
     Serial.println();
-    Serial.printf("DataLogger: Connected! IP: %s\n", WiFi.localIP().toString().c_str());
+    Serial.printf("DataLogger: STA connected! IP: %s\n", WiFi.localIP().toString().c_str());
 
     _wifi_connected = true;
 
@@ -212,14 +220,21 @@ void DataLogger::setEnabled(bool enable) {
 }
 
 void DataLogger::startAPMode() {
-    WiFi.mode(WIFI_AP);
+    // Switch to AP_STA so the access point doesn't kill the STA connection.
+    // If STA was connected, it stays connected; if not, it can reconnect later.
+    if (WiFi.getMode() != WIFI_AP_STA) {
+        WiFi.mode(WIFI_AP_STA);
+    }
     WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASS, WIFI_AP_CHANNEL);
 
     _ap_mode = true;
-    _wifi_connected = false;
+    // Don't clear _wifi_connected — STA may still be active
 
     Serial.printf("AP Mode started: %s\n", WIFI_AP_SSID);
     Serial.printf("AP IP: %s\n", WiFi.softAPIP().toString().c_str());
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.printf("STA still connected: %s\n", WiFi.localIP().toString().c_str());
+    }
 }
 
 void DataLogger::stopAPMode() {
@@ -428,18 +443,31 @@ void DataLogger::handleWiFiEvents() {
     bool connected = (WiFi.status() == WL_CONNECTED);
 
     if (_wifi_connected && !connected) {
-        // Lost connection
-        Serial.println("WiFi connection lost");
+        // Lost STA connection (AP continues serving web UI)
+        Serial.println("WiFi STA connection lost (AP still active)");
         _wifi_connected = false;
         _server_connected = false;
         reconnect_time = now;
     }
 
-    if (!_wifi_connected && !_ap_mode && _config && strlen(_config->wifi_ssid) > 0) {
-        // Try to reconnect
+    if (!_wifi_connected && _config && strlen(_config->wifi_ssid) > 0) {
+        // Try to reconnect STA without disrupting AP
         if (now - reconnect_time >= WIFI_RECONNECT_DELAY_MS) {
-            Serial.println("Attempting WiFi reconnection...");
-            connectWiFi();
+            Serial.println("Attempting STA reconnection...");
+            WiFi.begin(_config->wifi_ssid, _config->wifi_password);
+
+            uint32_t start = millis();
+            while (WiFi.status() != WL_CONNECTED && (millis() - start < 10000)) {
+                delay(250);
+            }
+
+            if (WiFi.status() == WL_CONNECTED) {
+                _wifi_connected = true;
+                Serial.printf("STA reconnected: %s\n", WiFi.localIP().toString().c_str());
+                syncTime();
+            } else {
+                reconnect_time = now;
+            }
         }
     }
 }

@@ -31,6 +31,7 @@
 #include "display.h"
 #include "data_logger.h"
 #include "sd_logger.h"
+#include "web_server.h"
 #include "fuzzy_logic.h"
 #include "device_manager.h"
 #include "self_test.h"
@@ -182,6 +183,15 @@ void setup() {
             display.showMessage("WiFi Failed", "Running offline");
             delay(2000);
         }
+    }
+
+    // Web server (accessible via AP hotspot at 192.168.4.1 and via STA IP)
+    if (webServer.begin(&systemConfig, &fuzzyController)) {
+        Serial.printf("Web UI: http://%s/ (AP) or http://%s/ (STA)\n",
+                      WiFi.softAPIP().toString().c_str(),
+                      WiFi.localIP().toString().c_str());
+        display.showMessage("Web UI Active", WiFi.softAPIP().toString().c_str());
+        delay(500);
     }
 
     // SD card logger (shares VSPI bus with MAX31865)
@@ -440,6 +450,14 @@ void taskLoggingLoop(void* parameter) {
 
         // Update SD logger (periodic flush)
         sdLogger.update();
+
+        // Service web server requests (AP + STA clients)
+        webServer.handleClient();
+        webServer.updateReadings(
+            systemState.conductivity_calibrated,
+            systemState.temperature_celsius,
+            0.0f  // TODO: flow_rate from water meter
+        );
 
         // Log sensor data at configured interval
         uint32_t now = millis();
