@@ -15,6 +15,7 @@ of the Columbia CT-6 Boiler Dosing Controller.
 | `test_fuzzy_logic.cpp` | Membership functions, rule evaluation, scenarios | - |
 | `test_gpio_pins.cpp` | All GPIO pins, I2C scan, relay/stepper tests | - |
 | `test_ezo_conductivity.cpp` | Atlas Scientific EZO-EC UART, PT1000 RTD via MAX31865 | Adafruit_MAX31865 |
+| `test_ezo_ds18b20.cpp` | EZO-EC + DS18B20 temp sensor (MAX31865 substitute) | OneWire, DallasTemperature |
 | `test_integration.cpp` | Full system integration test with simulation | - |
 | `test_fault_scenarios.cpp` | DeviceManager, SelfTest, SensorHealth fault injection (T1-T22) | - |
 | `test_sensor_health_edge_cases.cpp` | SensorHealth edge cases, safe mode transitions (E1-E12) | - |
@@ -58,6 +59,7 @@ pio run -e test_stepper_pumps -t upload -t monitor
 [env:test_integration]                  # Full integration test
 [env:test_fault_scenarios]             # Fault injection tests (T1-T22)
 [env:test_sensor_health_edge_cases]    # Sensor health edge cases (E1-E12)
+[env:test_ezo_ds18b20]                # EZO-EC + DS18B20 (no MAX31865 needed)
 ```
 
 ## Usage Instructions
@@ -129,6 +131,21 @@ Tests the Atlas Scientific EZO-EC conductivity circuit and Adafruit MAX31865 PT1
 - EZO command interface (R, Cal, T, K, Status, etc.)
 - PT1000 RTD temperature reading via software SPI
 - Temperature-compensated conductivity readings
+
+### test_ezo_ds18b20.cpp
+
+Drop-in replacement for `test_ezo_conductivity.cpp` when the MAX31865 board is unavailable.
+Uses a DS18B20 OneWire digital temperature sensor on **GPIO16** for temperature-compensated
+conductivity readings:
+- DS18B20 initialization, ROM address discovery, OneWire bus scan
+- 12-bit temperature readings (0.0625°C resolution)
+- Temperature stability analysis (min/max/avg over 20 samples)
+- EZO-EC `RT,<temp>` command for temperature-compensated EC readings
+- Full EZO calibration suite (dry, single-point, two-point)
+- Continuous mode with live DS18B20 + EZO combined output
+
+**Wiring:** DS18B20 DATA → GPIO16, 4.7kΩ pull-up to 3.3V, VCC → 3.3V, GND → GND.
+Parasitic power mode also supported (tie VCC to GND).
 
 ### test_gpio_pins.cpp
 
