@@ -19,6 +19,7 @@ of the Columbia CT-6 Boiler Dosing Controller.
 | `test_integration.cpp` | Full system integration test with simulation | - |
 | `test_fault_scenarios.cpp` | DeviceManager, SelfTest, SensorHealth fault injection (T1-T22) | - |
 | `test_sensor_health_edge_cases.cpp` | SensorHealth edge cases, safe mode transitions (E1-E12) | - |
+| `test_a4988_current_limit.cpp` | A4988 Vref/current limit setup, stall testing | - |
 
 ## Building with PlatformIO
 
@@ -60,6 +61,7 @@ pio run -e test_stepper_pumps -t upload -t monitor
 [env:test_fault_scenarios]             # Fault injection tests (T1-T22)
 [env:test_sensor_health_edge_cases]    # Sensor health edge cases (E1-E12)
 [env:test_ezo_ds18b20]                # EZO-EC + DS18B20 (no MAX31865 needed)
+[env:test_a4988_current_limit]        # A4988 Vref/current limit setup
 ```
 
 ## Usage Instructions
@@ -185,6 +187,18 @@ Edge case tests for SensorHealthMonitor and its DeviceManager integration:
 
 Documents known behavioral gaps with `KNOWN GAP` annotations in test output.
 Runs automatically on boot with PASS/FAIL summary. No external hardware required.
+
+### test_a4988_current_limit.cpp
+
+Guides the user through setting the A4988 current limit via the Vref potentiometer:
+- Select board type (Pololu, StepStick, FYSETC, Generic, or custom Rsense)
+- Current-to-Vref reference table and calculator
+- Slow step mode for measuring Vref with a multimeter
+- Stall test at increasing speeds to verify current is sufficient
+- Step-by-step procedure printed in the menu
+
+**Procedure:** Select board type (`r`) -> Calculate target Vref (`V`) -> Enable drivers (`e`) ->
+Slow step (`1`/`2`/`3`) while adjusting pot -> Verify with stall test (`4`/`5`/`6`).
 
 ## Pin Definitions
 
