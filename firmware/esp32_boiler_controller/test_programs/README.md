@@ -16,6 +16,8 @@ of the Columbia CT-6 Boiler Dosing Controller.
 | `test_gpio_pins.cpp` | All GPIO pins, I2C scan, relay/stepper tests | - |
 | `test_ezo_conductivity.cpp` | Atlas Scientific EZO-EC UART, PT1000 RTD via MAX31865 | Adafruit_MAX31865 |
 | `test_integration.cpp` | Full system integration test with simulation | - |
+| `test_fault_scenarios.cpp` | DeviceManager, SelfTest, SensorHealth fault injection (T1-T22) | - |
+| `test_sensor_health_edge_cases.cpp` | SensorHealth edge cases, safe mode transitions (E1-E12) | - |
 
 ## Building with PlatformIO
 
@@ -53,7 +55,9 @@ pio run -e test_stepper_pumps -t upload -t monitor
 [env:test_fuzzy_logic]         # Fuzzy logic controller test
 [env:test_gpio_pins]           # GPIO pin test
 [env:test_ezo_conductivity]    # EZO-EC + PT1000 RTD test
-[env:test_integration]         # Full integration test
+[env:test_integration]                  # Full integration test
+[env:test_fault_scenarios]             # Fault injection tests (T1-T22)
+[env:test_sensor_health_edge_cases]    # Sensor health edge cases (E1-E12)
 ```
 
 ## Usage Instructions
@@ -142,6 +146,28 @@ Full system integration test:
 - Runs all individual component tests
 - 60-second operational simulation
 - Generates pass/fail report
+
+### test_fault_scenarios.cpp
+
+Automated fault injection test harness for the error handling modules:
+- **T1-T11:** Core fault scenarios (probe missing, intermittent faults, device enable/disable,
+  stale readings, I2C recovery, dependencies, safe mode, zero-reading rejection, status reporting)
+- **T12-T22:** Extended scenarios (temperature/feedback fault recovery, concurrent faults,
+  boundary checks, stale data safe mode, unknown feed modes, fault counter limits,
+  sentinel values, conductivity range boundaries, hold time enforcement, fault-clear-refault cycles)
+
+Runs automatically on boot — all tests execute sequentially and print PASS/FAIL summary.
+No interactive menu. Requires only an ESP32 with no external hardware connected.
+
+### test_sensor_health_edge_cases.cpp
+
+Edge case tests for SensorHealthMonitor and its DeviceManager integration:
+- **E1-E4:** Staleness detection, safe mode auto-exit gaps, measurement freshness, I2C rate limiting
+- **E5-E8:** Rapid oscillation, feedback range validation gaps, safe mode re-entry, disabled sensors
+- **E9-E12:** Mask consistency, initial state verification, safe mode priority, suspect flag lifecycle
+
+Documents known behavioral gaps with `KNOWN GAP` annotations in test output.
+Runs automatically on boot with PASS/FAIL summary. No external hardware required.
 
 ## Pin Definitions
 
