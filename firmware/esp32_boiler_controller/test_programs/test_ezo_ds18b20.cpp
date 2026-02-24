@@ -349,12 +349,12 @@ void readTemperature() {
     for (int i = 0; i < 10; i++) {
         ds18b20.requestTemperatures();
         float temp = ds18b20.getTempC(ds18b20Address);
-        float raw = ds18b20.getTempRawC(ds18b20Address);
+        int16_t raw = ds18b20.getTemp(ds18b20Address);
 
         Serial.printf("  %2d: T=%.4f C  (%.4f F)  raw=%d",
                       i + 1, temp,
                       temp * 9.0 / 5.0 + 32.0,
-                      (int)raw);
+                      raw);
 
         if (temp == DEVICE_DISCONNECTED_C) {
             Serial.print("  DISCONNECTED");
