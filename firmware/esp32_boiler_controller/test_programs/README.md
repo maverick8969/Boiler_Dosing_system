@@ -21,6 +21,7 @@ of the Columbia CT-6 Boiler Dosing Controller.
 | `test_sensor_health_edge_cases.cpp` | SensorHealth edge cases, safe mode transitions (E1-E12) | - |
 | `test_a4988_current_limit.cpp` | A4988 Vref/current limit setup, stall testing | - |
 | `test_blowdown_valve.cpp` | Blowdown valve relay control, 4-20mA feedback via ADS1115 | - |
+| `test_dual_temp_conductivity.cpp` | PT1000 RTD + DS18B20 + EZO-EC side-by-side comparison | Adafruit_MAX31865, OneWire, DallasTemperature |
 
 ## Building with PlatformIO
 
@@ -64,6 +65,7 @@ pio run -e test_stepper_pumps -t upload -t monitor
 [env:test_ezo_ds18b20]                # EZO-EC + DS18B20 (no MAX31865 needed)
 [env:test_a4988_current_limit]        # A4988 Vref/current limit setup
 [env:test_blowdown_valve]             # Blowdown valve relay + 4-20mA feedback
+[env:test_dual_temp_conductivity]     # PT1000 + DS18B20 + EZO-EC dual temp
 ```
 
 ## Usage Instructions
@@ -214,6 +216,23 @@ Tests the Assured Automation E26NRXS4UV-EP420C blowdown ball valve:
 - Fault detection for wiring issues or stuck valve
 
 **Wiring:** GPIO4 -> MOSFET -> relay coil. Relay NC -> 3.3k (4mA closed).
+Relay NO -> 680 ohm (20mA open). Actuator feedback -> 150 ohm -> ADS1115 CH0.
+
+### test_dual_temp_conductivity.cpp
+
+Runs PT1000 RTD (MAX31865) and DS18B20 digital temperature sensor simultaneously
+alongside the Atlas Scientific EZO-EC conductivity circuit:
+- Side-by-side temperature comparison with delta tracking
+- 60-second comparison mode with delta min/max/avg statistics
+- Selectable temp source for EZO compensation (RTD, DS18B20, average, or manual)
+- Auto-fallback: if the selected sensor fails, uses the other or manual temp
+- Full EZO calibration suite (dry, single-point, two-point)
+- Individual sensor diagnostics (SPI, OneWire, UART)
+
+**Wiring:** MAX31865 on SPI (CS=GPIO16, MOSI=GPIO23, MISO=GPIO39, SCK=GPIO18).
+DS18B20 DATA -> GPIO17 with 4.7k pull-up to 3.3V. EZO-EC UART TX=GPIO25, RX=GPIO36.
+
+## Pin Definitions
 Relay NO -> 680 ohm (20mA open). Actuator feedback -> 150 ohm -> ADS1115 CH0.
 
 ## Pin Definitions
