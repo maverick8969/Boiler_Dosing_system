@@ -234,9 +234,6 @@ alongside the Atlas Scientific EZO-EC conductivity circuit:
 DS18B20 DATA -> GPIO4 with 4.7k pull-up to 3.3V. EZO-EC UART TX=GPIO25, RX=GPIO36.
 
 ## Pin Definitions
-Relay NO -> 680 ohm (20mA open). Actuator feedback -> 150 ohm -> ADS1115 CH0.
-
-## Pin Definitions
 
 Test programs use `#include "pin_definitions.h"` from the main firmware for canonical
 pin assignments. If your hardware differs, edit that header — changes propagate to all tests.
