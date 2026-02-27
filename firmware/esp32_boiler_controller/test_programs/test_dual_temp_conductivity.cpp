@@ -8,12 +8,15 @@
  *
  * Hardware:
  * - Atlas Scientific EZO-EC on Serial2 (TX=GPIO25, RX=GPIO36)
- * - Adafruit MAX31865 PT1000 on software SPI (CS=GPIO16, MOSI=GPIO23,
- *   MISO=GPIO39, SCK=GPIO18)
- * - DS18B20 OneWire sensor on GPIO17 (AUX_INPUT1, since GPIO16 is MAX31865 CS)
+ * - Adafruit MAX31865 PT1000 on software SPI — adjacent pins on 30-pin DevKitC:
+ *     CS=GPIO19, SCK=GPIO18, MOSI=GPIO17, MISO=GPIO16
+ * - DS18B20 OneWire sensor on GPIO4
+ *
+ * 30-pin ESP32 DevKitC right-side layout (relevant pins):
+ *   ... D19 [CS] — D18 [SCK] — D5 — D17 [MOSI] — D16 [MISO] — D4 [DS18B20] ...
  *
  * Wiring (DS18B20):
- *   DATA → GPIO17 with 4.7k ohm pull-up to 3.3V
+ *   DATA → GPIO4 with 4.7k ohm pull-up to 3.3V
  *   VCC  → 3.3V
  *   GND  → GND
  *
@@ -36,19 +39,18 @@
 #define EZO_RX_PIN          36      // ESP32 RX <- EZO TX
 #define EZO_BAUD            9600
 
-// Adafruit MAX31865 Software SPI
-#define RTD_CS_PIN          16
-#define RTD_MOSI_PIN        23
-#define RTD_MISO_PIN        39
+// Adafruit MAX31865 Software SPI (adjacent pins on 30-pin ESP32 DevKitC right header)
+#define RTD_CS_PIN          19
 #define RTD_SCK_PIN         18
+#define RTD_MOSI_PIN        17
+#define RTD_MISO_PIN        16
 
 // PT1000 configuration
 #define RTD_NOMINAL         1000.0  // Nominal resistance at 0C
 #define RTD_REFERENCE       4300.0  // Reference resistor on MAX31865 board
 
-// DS18B20 OneWire (GPIO17 since GPIO16 is MAX31865 CS)
-#define DS18B20_PIN         17
-#define DS18B20_RESOLUTION  12      // 12-bit = 0.0625C (750ms conversion)
+// DS18B20 OneWire (GPIO4, adjacent to MAX31865 cluster on right header)
+#define DS18B20_PIN         4
 
 // ============================================================================
 // TEMPERATURE SOURCE SELECTION
@@ -179,7 +181,7 @@ void setup() {
 
     if (deviceCount > 0) {
         if (ds18b20.getAddress(ds18b20Address, 0)) {
-            ds18b20.setResolution(ds18b20Address, DS18B20_RESOLUTION);
+            ds18b20.setResolution(ds18b20Address, 12);  // 12-bit = 0.0625C resolution
             ds18b20.setWaitForConversion(true);
 
             ds18b20.requestTemperatures();
@@ -812,7 +814,7 @@ void testDS18B20() {
     Serial.println("=== DS18B20 DIAGNOSTIC ===");
 
     Serial.printf("  Data pin:     GPIO%d\n", DS18B20_PIN);
-    Serial.printf("  Resolution:   %d-bit\n", DS18B20_RESOLUTION);
+    Serial.println("  Resolution:   12-bit (0.0625 C)");
 
     ds18b20.begin();
     int count = ds18b20.getDeviceCount();

@@ -229,8 +229,9 @@ alongside the Atlas Scientific EZO-EC conductivity circuit:
 - Full EZO calibration suite (dry, single-point, two-point)
 - Individual sensor diagnostics (SPI, OneWire, UART)
 
-**Wiring:** MAX31865 on SPI (CS=GPIO16, MOSI=GPIO23, MISO=GPIO39, SCK=GPIO18).
-DS18B20 DATA -> GPIO17 with 4.7k pull-up to 3.3V. EZO-EC UART TX=GPIO25, RX=GPIO36.
+**Wiring:** MAX31865 software SPI on adjacent 30-pin DevKitC right-header pins
+(CS=GPIO19, SCK=GPIO18, MOSI=GPIO17, MISO=GPIO16).
+DS18B20 DATA -> GPIO4 with 4.7k pull-up to 3.3V. EZO-EC UART TX=GPIO25, RX=GPIO36.
 
 ## Pin Definitions
 Relay NO -> 680 ohm (20mA open). Actuator feedback -> 150 ohm -> ADS1115 CH0.
