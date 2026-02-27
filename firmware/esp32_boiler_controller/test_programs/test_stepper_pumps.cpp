@@ -1,23 +1,23 @@
 /**
  * @file test_stepper_pumps.cpp
- * @brief Test program for stepper motor chemical pumps
- *
- * Tests:
- * - A4988 driver enable/disable
- * - Individual pump motor operation
- * - Direction control
- * - Speed settings
- * - Steps per ml calibration
+ * @brief Stepper pump test - Sulfite & Amine dosing pumps
  *
  * Hardware:
- * - 3x Nema17 stepper motors
- * - 3x A4988 stepper drivers
- * - Shared enable pin
+ * - 2x Nema17 stepper motors (Sulfite, Amine)
+ * - 2x A4988 stepper drivers
+ * - 1 shared DIR pin wired to both drivers (clockwise only, no reversing needed)
+ * - Individual ENABLE pins per pump for UI-level on/off control
+ *
+ * Pulse Timer:
+ * - Fires once every PULSE_INTERVAL_MS
+ * - Each pulse commands ROTATIONS_PER_PULSE full rotations on each enabled pump
+ * - Default: 1 pulse per 5 seconds → 2 rotations per pump
  *
  * Usage:
  * - Upload to ESP32
  * - Open Serial Monitor at 115200 baud
- * - Follow menu prompts to test each pump
+ * - Pumps start enabled; pulse timer fires automatically
+ * - Use serial commands to toggle individual pumps, pause timer, or fire manually
  */
 
 #include <Arduino.h>
@@ -29,55 +29,59 @@
 
 void printMenu();
 void processCommand(char cmd);
-void toggleEnable();
-void runPump(int pumpIndex, long steps);
-void runAllPumps(long steps);
-void runRevolution(int pumpIndex);
-void runAllRevolutions();
-void runCalibration();
-void adjustSpeed(int delta);
+void triggerPulse();
 void stopAll();
 void printStatus();
 
 // ============================================================================
-// PIN DEFINITIONS (Match your hardware)
+// PIN DEFINITIONS
 // ============================================================================
 
-// Stepper driver pins
-#define STEPPER_ENABLE_PIN  13  // Shared enable (active LOW)
+// Shared DIR pin - wired to both A4988 DIR inputs; clockwise only
+#define STEPPER_DIR_PIN         26
 
-#define STEPPER1_STEP_PIN   27  // Pump 1 (H2SO3)
-#define STEPPER1_DIR_PIN    26
+// Individual STEP pins
+#define SULFITE_STEP_PIN        27  // Pump 1: Sulfite (oxygen scavenger)
+#define AMINE_STEP_PIN          32  // Pump 2: Amine (condensate treatment)
 
-#define STEPPER2_STEP_PIN   25  // Pump 2 (NaOH)
-#define STEPPER2_DIR_PIN    33
-
-#define STEPPER3_STEP_PIN   32  // Pump 3 (Amine)
-#define STEPPER3_DIR_PIN    14
-
-// ============================================================================
-// CONFIGURATION
-// ============================================================================
-
-#define DEFAULT_SPEED       500     // steps/sec
-#define DEFAULT_ACCEL       200     // steps/sec^2
-#define STEPS_PER_REV       200     // Full steps per revolution
-#define MICROSTEPPING       16      // A4988 microstepping setting
-#define TOTAL_STEPS_REV     (STEPS_PER_REV * MICROSTEPPING)  // 3200 steps/rev
+// Individual ENABLE pins (active LOW) - wire each to a UI output for remote control
+#define SULFITE_ENABLE_PIN      13  // Pump 1 enable
+#define AMINE_ENABLE_PIN        14  // Pump 2 enable
 
 // ============================================================================
-// GLOBAL OBJECTS
+// PULSE TIMER CONFIGURATION  <-- edit these to tune dosing cadence
 // ============================================================================
 
-AccelStepper pump1(AccelStepper::DRIVER, STEPPER1_STEP_PIN, STEPPER1_DIR_PIN);
-AccelStepper pump2(AccelStepper::DRIVER, STEPPER2_STEP_PIN, STEPPER2_DIR_PIN);
-AccelStepper pump3(AccelStepper::DRIVER, STEPPER3_STEP_PIN, STEPPER3_DIR_PIN);
+#define PULSE_INTERVAL_MS       5000UL  // Time between pulses in milliseconds
+#define ROTATIONS_PER_PULSE     2       // Full motor rotations per pulse
 
-AccelStepper* pumps[] = {&pump1, &pump2, &pump3};
-const char* pumpNames[] = {"H2SO3 (Pump 1)", "NaOH (Pump 2)", "Amine (Pump 3)"};
+// ============================================================================
+// MOTOR CONFIGURATION
+// ============================================================================
 
-bool driversEnabled = false;
-int currentSpeed = DEFAULT_SPEED;
+#define DEFAULT_SPEED           500     // steps/sec
+#define DEFAULT_ACCEL           200     // steps/sec^2
+#define STEPS_PER_REV           200     // Full steps per revolution (Nema17)
+#define MICROSTEPPING           16      // A4988 MS1/MS2/MS3 setting
+#define TOTAL_STEPS_REV         (STEPS_PER_REV * MICROSTEPPING)  // 3200 steps/rev
+
+// ============================================================================
+// GLOBALS
+// ============================================================================
+
+// Both pumps share the DIR pin - AccelStepper controls it but we always move
+// positive steps, so it stays HIGH (clockwise) throughout normal operation
+AccelStepper sulfitePump(AccelStepper::DRIVER, SULFITE_STEP_PIN, STEPPER_DIR_PIN);
+AccelStepper aminePump(AccelStepper::DRIVER, AMINE_STEP_PIN,   STEPPER_DIR_PIN);
+
+AccelStepper* pumps[]     = { &sulfitePump,      &aminePump       };
+const char*   pumpNames[] = { "Sulfite (Pump 1)", "Amine (Pump 2)" };
+const int     enablePins[] = { SULFITE_ENABLE_PIN, AMINE_ENABLE_PIN };
+
+bool          pumpEnabled[2]  = { true, true };  // per-pump enable state
+bool          pulseTimerActive = true;
+unsigned long lastPulseTime    = 0;
+int           currentSpeed     = DEFAULT_SPEED;
 
 // ============================================================================
 // SETUP
@@ -89,26 +93,38 @@ void setup() {
 
     Serial.println();
     Serial.println("========================================");
-    Serial.println("  STEPPER PUMP TEST PROGRAM");
+    Serial.println("  STEPPER PUMP TEST - SULFITE & AMINE");
     Serial.println("========================================");
     Serial.println();
 
-    // Configure enable pin
-    pinMode(STEPPER_ENABLE_PIN, OUTPUT);
-    digitalWrite(STEPPER_ENABLE_PIN, HIGH);  // Disabled (active LOW)
+    // DIR pin - set HIGH for clockwise; AccelStepper will keep it HIGH as long
+    // as we always command positive (forward) steps
+    pinMode(STEPPER_DIR_PIN, OUTPUT);
+    digitalWrite(STEPPER_DIR_PIN, HIGH);
 
-    // Configure all steppers
-    for (int i = 0; i < 3; i++) {
+    // Individual enable pins - start enabled (LOW = enabled on A4988)
+    for (int i = 0; i < 2; i++) {
+        pinMode(enablePins[i], OUTPUT);
+        digitalWrite(enablePins[i], LOW);
+    }
+
+    // Configure AccelStepper instances
+    for (int i = 0; i < 2; i++) {
         pumps[i]->setMaxSpeed(DEFAULT_SPEED);
         pumps[i]->setAcceleration(DEFAULT_ACCEL);
         pumps[i]->setCurrentPosition(0);
     }
 
-    Serial.println("Stepper drivers initialized.");
-    Serial.println("Drivers currently DISABLED (enable pin HIGH)");
+    long stepsPerPulse = (long)ROTATIONS_PER_PULSE * TOTAL_STEPS_REV;
+    Serial.printf("Pulse interval : %lu ms\n", PULSE_INTERVAL_MS);
+    Serial.printf("Rotations/pulse: %d  (%ld steps)\n", ROTATIONS_PER_PULSE, stepsPerPulse);
+    Serial.printf("Motor speed    : %d steps/sec\n", DEFAULT_SPEED);
+    Serial.println("Both pumps ENABLED. Pulse timer ACTIVE.");
     Serial.println();
 
     printMenu();
+
+    lastPulseTime = millis();
 }
 
 // ============================================================================
@@ -116,15 +132,44 @@ void setup() {
 // ============================================================================
 
 void loop() {
-    // Process serial commands
+    // Handle serial commands
     if (Serial.available()) {
         char cmd = Serial.read();
-        processCommand(cmd);
+        if (cmd != '\n' && cmd != '\r') {
+            processCommand(cmd);
+        }
     }
 
-    // Run steppers (non-blocking)
-    for (int i = 0; i < 3; i++) {
+    // Pulse timer - triggers both pumps on schedule
+    if (pulseTimerActive && (millis() - lastPulseTime >= PULSE_INTERVAL_MS)) {
+        lastPulseTime = millis();
+        triggerPulse();
+    }
+
+    // Non-blocking stepper execution
+    for (int i = 0; i < 2; i++) {
         pumps[i]->run();
+    }
+}
+
+// ============================================================================
+// PULSE TIMER
+// ============================================================================
+
+void triggerPulse() {
+    long steps = (long)ROTATIONS_PER_PULSE * TOTAL_STEPS_REV;
+
+    Serial.printf("[PULSE] %d rotation(s) = %ld steps per enabled pump\n",
+                  ROTATIONS_PER_PULSE, steps);
+
+    for (int i = 0; i < 2; i++) {
+        if (pumpEnabled[i]) {
+            pumps[i]->setMaxSpeed(currentSpeed);
+            pumps[i]->move(steps);
+            Serial.printf("  -> %-18s queued\n", pumpNames[i]);
+        } else {
+            Serial.printf("  -> %-18s DISABLED, skipped\n", pumpNames[i]);
+        }
     }
 }
 
@@ -134,72 +179,51 @@ void loop() {
 
 void processCommand(char cmd) {
     switch (cmd) {
-        case 'e':
-        case 'E':
-            toggleEnable();
-            break;
 
+        // ---- Per-pump enable toggle (tie enable pins to UI outputs) ----------
         case '1':
-            runPump(0, 1000);  // Run pump 1, 1000 steps
+            pumpEnabled[0] = !pumpEnabled[0];
+            digitalWrite(SULFITE_ENABLE_PIN, pumpEnabled[0] ? LOW : HIGH);
+            Serial.printf("Sulfite pump: %s\n", pumpEnabled[0] ? "ENABLED" : "DISABLED");
+            if (!pumpEnabled[0]) pumps[0]->stop();
             break;
+
         case '2':
-            runPump(1, 1000);
-            break;
-        case '3':
-            runPump(2, 1000);
-            break;
-
-        case '!':
-            runPump(0, -1000);  // Reverse direction
-            break;
-        case '@':
-            runPump(1, -1000);
-            break;
-        case '#':
-            runPump(2, -1000);
+            pumpEnabled[1] = !pumpEnabled[1];
+            digitalWrite(AMINE_ENABLE_PIN, pumpEnabled[1] ? LOW : HIGH);
+            Serial.printf("Amine pump  : %s\n", pumpEnabled[1] ? "ENABLED" : "DISABLED");
+            if (!pumpEnabled[1]) pumps[1]->stop();
             break;
 
-        case 'a':
-            runAllPumps(1000);
-            break;
-        case 'A':
-            runAllPumps(-1000);
-            break;
-
-        case 'r':
-            runRevolution(0);
-            break;
-        case 'R':
-            runAllRevolutions();
+        // ---- Pulse timer controls -------------------------------------------
+        case 't':
+        case 'T':
+            pulseTimerActive = !pulseTimerActive;
+            Serial.printf("Pulse timer : %s\n", pulseTimerActive ? "ACTIVE" : "PAUSED");
+            if (pulseTimerActive) lastPulseTime = millis();  // reset on resume
             break;
 
-        case 'c':
-            runCalibration();
+        case 'f':
+        case 'F':
+            Serial.println("Manual pulse fired:");
+            triggerPulse();
+            lastPulseTime = millis();  // restart interval from now
             break;
 
-        case '+':
-            adjustSpeed(100);
-            break;
-        case '-':
-            adjustSpeed(-100);
-            break;
-
+        // ---- Utility --------------------------------------------------------
         case 's':
+        case 'S':
             stopAll();
             break;
 
         case 'p':
+        case 'P':
             printStatus();
             break;
 
         case 'h':
         case '?':
             printMenu();
-            break;
-
-        case '\n':
-        case '\r':
-            // Ignore newlines
             break;
 
         default:
@@ -209,206 +233,63 @@ void processCommand(char cmd) {
 }
 
 // ============================================================================
-// PUMP CONTROL FUNCTIONS
+// PUMP CONTROL
 // ============================================================================
 
-void toggleEnable() {
-    driversEnabled = !driversEnabled;
-    digitalWrite(STEPPER_ENABLE_PIN, driversEnabled ? LOW : HIGH);
-
-    Serial.printf("Drivers %s\n", driversEnabled ? "ENABLED" : "DISABLED");
-
-    if (!driversEnabled) {
-        Serial.println("WARNING: Motors will not hold position when disabled");
-    }
-}
-
-void runPump(int pumpIndex, long steps) {
-    if (!driversEnabled) {
-        Serial.println("ERROR: Enable drivers first (press 'e')");
-        return;
-    }
-
-    if (pumpIndex < 0 || pumpIndex > 2) {
-        Serial.println("ERROR: Invalid pump index");
-        return;
-    }
-
-    Serial.printf("Running %s: %ld steps at %d steps/sec\n",
-                  pumpNames[pumpIndex], steps, currentSpeed);
-
-    pumps[pumpIndex]->setMaxSpeed(currentSpeed);
-    pumps[pumpIndex]->move(steps);
-}
-
-void runAllPumps(long steps) {
-    if (!driversEnabled) {
-        Serial.println("ERROR: Enable drivers first (press 'e')");
-        return;
-    }
-
-    Serial.printf("Running ALL pumps: %ld steps\n", steps);
-
-    for (int i = 0; i < 3; i++) {
-        pumps[i]->setMaxSpeed(currentSpeed);
-        pumps[i]->move(steps);
-    }
-}
-
-void runRevolution(int pumpIndex) {
-    if (!driversEnabled) {
-        Serial.println("ERROR: Enable drivers first (press 'e')");
-        return;
-    }
-
-    Serial.printf("Running %s: 1 full revolution (%d steps)\n",
-                  pumpNames[pumpIndex], TOTAL_STEPS_REV);
-
-    pumps[pumpIndex]->move(TOTAL_STEPS_REV);
-}
-
-void runAllRevolutions() {
-    if (!driversEnabled) {
-        Serial.println("ERROR: Enable drivers first (press 'e')");
-        return;
-    }
-
-    Serial.println("Running ALL pumps: 1 revolution each");
-
-    for (int i = 0; i < 3; i++) {
-        pumps[i]->move(TOTAL_STEPS_REV);
-    }
-}
-
-void runCalibration() {
-    Serial.println();
-    Serial.println("=== PUMP CALIBRATION MODE ===");
-    Serial.println("This will run each pump to measure ml per revolution.");
-    Serial.println();
-    Serial.println("Instructions:");
-    Serial.println("1. Place a graduated cylinder under the pump outlet");
-    Serial.println("2. Prime the pump tubing first");
-    Serial.println("3. Note the starting level in the cylinder");
-    Serial.println("4. Run the specified number of revolutions");
-    Serial.println("5. Measure the volume dispensed");
-    Serial.println("6. Calculate: steps_per_ml = total_steps / ml_dispensed");
-    Serial.println();
-    Serial.println("Press '1', '2', or '3' to run 10 revolutions on that pump");
-    Serial.printf("(10 rev = %d steps)\n", TOTAL_STEPS_REV * 10);
-    Serial.println();
-
-    // Wait for pump selection
-    while (!Serial.available()) {
-        delay(10);
-    }
-
-    char sel = Serial.read();
-    int pumpIdx = sel - '1';
-
-    if (pumpIdx < 0 || pumpIdx > 2) {
-        Serial.println("Calibration cancelled");
-        return;
-    }
-
-    if (!driversEnabled) {
-        driversEnabled = true;
-        digitalWrite(STEPPER_ENABLE_PIN, LOW);
-        Serial.println("Drivers enabled");
-    }
-
-    long calSteps = TOTAL_STEPS_REV * 10;
-    Serial.printf("\nRunning %s: 10 revolutions (%ld steps)...\n",
-                  pumpNames[pumpIdx], calSteps);
-
-    pumps[pumpIdx]->setMaxSpeed(currentSpeed);
-    pumps[pumpIdx]->move(calSteps);
-
-    // Wait for completion
-    while (pumps[pumpIdx]->distanceToGo() != 0) {
-        pumps[pumpIdx]->run();
-    }
-
-    Serial.println("Done!");
-    Serial.println();
-    Serial.println("Measure the volume dispensed and calculate:");
-    Serial.printf("  steps_per_ml = %ld / ml_dispensed\n", calSteps);
-    Serial.println();
-}
-
-void adjustSpeed(int delta) {
-    currentSpeed += delta;
-    currentSpeed = constrain(currentSpeed, 100, 2000);
-
-    Serial.printf("Speed adjusted to %d steps/sec\n", currentSpeed);
-
-    for (int i = 0; i < 3; i++) {
-        pumps[i]->setMaxSpeed(currentSpeed);
-    }
-}
-
 void stopAll() {
-    Serial.println("STOPPING all pumps!");
-
-    for (int i = 0; i < 3; i++) {
+    Serial.println("STOP - clearing all pump queues");
+    for (int i = 0; i < 2; i++) {
         pumps[i]->stop();
         pumps[i]->setCurrentPosition(pumps[i]->currentPosition());
     }
 }
 
 // ============================================================================
-// STATUS AND HELP
+// STATUS & HELP
 // ============================================================================
 
 void printStatus() {
+    unsigned long elapsed = millis() - lastPulseTime;
+    unsigned long remaining = (elapsed >= PULSE_INTERVAL_MS) ? 0 : PULSE_INTERVAL_MS - elapsed;
+
     Serial.println();
-    Serial.println("=== PUMP STATUS ===");
-    Serial.printf("Drivers: %s\n", driversEnabled ? "ENABLED" : "DISABLED");
-    Serial.printf("Speed: %d steps/sec\n", currentSpeed);
-    Serial.printf("Steps per revolution: %d\n", TOTAL_STEPS_REV);
+    Serial.println("=== STATUS ===");
+    Serial.printf("Pulse timer   : %s\n", pulseTimerActive ? "ACTIVE" : "PAUSED");
+    Serial.printf("Interval      : %lu ms\n", PULSE_INTERVAL_MS);
+    Serial.printf("Next pulse in : %lu ms\n", remaining);
+    Serial.printf("Rotations/pls : %d  (%ld steps)\n",
+                  ROTATIONS_PER_PULSE, (long)ROTATIONS_PER_PULSE * TOTAL_STEPS_REV);
+    Serial.printf("Motor speed   : %d steps/sec\n", currentSpeed);
     Serial.println();
 
-    for (int i = 0; i < 3; i++) {
-        Serial.printf("%s:\n", pumpNames[i]);
-        Serial.printf("  Position: %ld steps\n", pumps[i]->currentPosition());
-        Serial.printf("  To go: %ld steps\n", pumps[i]->distanceToGo());
-        Serial.printf("  Running: %s\n", pumps[i]->isRunning() ? "YES" : "NO");
+    for (int i = 0; i < 2; i++) {
+        Serial.printf("%s\n", pumpNames[i]);
+        Serial.printf("  Enabled : %s\n", pumpEnabled[i] ? "YES" : "NO");
+        Serial.printf("  Running : %s\n", pumps[i]->isRunning() ? "YES" : "NO");
+        Serial.printf("  Steps remaining: %ld\n", pumps[i]->distanceToGo());
+        Serial.printf("  Total steps run: %ld\n", pumps[i]->currentPosition());
     }
     Serial.println();
 }
 
 void printMenu() {
     Serial.println();
-    Serial.println("=== STEPPER PUMP TEST MENU ===");
+    Serial.println("=== MENU ===");
     Serial.println();
-    Serial.println("Enable/Disable:");
-    Serial.println("  e - Toggle driver enable");
+    Serial.println("Pump enable (toggles ENABLE pin - connect to UI output):");
+    Serial.println("  1  Toggle Sulfite pump ON/OFF");
+    Serial.println("  2  Toggle Amine pump ON/OFF");
     Serial.println();
-    Serial.println("Run Forward (1000 steps):");
-    Serial.println("  1 - Run Pump 1 (H2SO3)");
-    Serial.println("  2 - Run Pump 2 (NaOH)");
-    Serial.println("  3 - Run Pump 3 (Amine)");
-    Serial.println("  a - Run ALL pumps");
+    Serial.println("Pulse timer:");
+    Serial.println("  t  Toggle pulse timer ACTIVE/PAUSED");
+    Serial.println("  f  Fire one pulse immediately (resets timer)");
     Serial.println();
-    Serial.println("Run Reverse (1000 steps):");
-    Serial.println("  ! - Reverse Pump 1");
-    Serial.println("  @ - Reverse Pump 2");
-    Serial.println("  # - Reverse Pump 3");
-    Serial.println("  A - Reverse ALL");
+    Serial.println("Utility:");
+    Serial.println("  s  STOP all pumps (clear step queue)");
+    Serial.println("  p  Print status");
+    Serial.println("  h  Show this menu");
     Serial.println();
-    Serial.println("Full Revolutions:");
-    Serial.println("  r - Run Pump 1 one revolution");
-    Serial.println("  R - Run ALL one revolution");
-    Serial.println();
-    Serial.println("Calibration:");
-    Serial.println("  c - Start calibration mode");
-    Serial.println();
-    Serial.println("Speed Control:");
-    Serial.println("  + - Increase speed by 100");
-    Serial.println("  - - Decrease speed by 100");
-    Serial.println();
-    Serial.println("Other:");
-    Serial.println("  s - STOP all pumps");
-    Serial.println("  p - Print status");
-    Serial.println("  h - Show this menu");
+    Serial.printf("[ Pulse every %lu ms | %d rotations | %d steps/rev ]\n",
+                  PULSE_INTERVAL_MS, ROTATIONS_PER_PULSE, TOTAL_STEPS_REV);
     Serial.println();
 }
