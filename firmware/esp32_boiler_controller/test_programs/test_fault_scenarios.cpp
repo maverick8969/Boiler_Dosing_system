@@ -19,6 +19,18 @@
  *   T8: Dependency checking (pump mode vs. water meter)
  *   T9: Safe mode entry and exit
  *   T10: Zero-reading rejection for conductivity
+ *   T11: Device status reporting
+ *   T12: Temperature sensor fault/recovery hysteresis
+ *   T13: Valve feedback sensor fault/recovery hysteresis
+ *   T14: Multiple concurrent sensor faults trigger safe mode
+ *   T15: DeviceManager boundary checks (invalid device IDs)
+ *   T16: Safe mode STALE_DATA entry path
+ *   T17: Unknown feed mode dependency (silent pass behavior)
+ *   T18: Fault counter near overflow limits
+ *   T19: Temperature sentinel value detection
+ *   T20: Conductivity range boundary values
+ *   T21: Safe mode hold time enforcement
+ *   T22: Device fault then clear then re-fault cycle
  */
 
 #include <Arduino.h>
@@ -492,6 +504,554 @@ void test_status_reporting() {
 }
 
 // ============================================================================
+// T12: TEMPERATURE SENSOR FAULT AND RECOVERY
+// ============================================================================
+
+void test_temperature_fault_recovery() {
+    TEST_BEGIN("T12: Temperature Sensor Fault/Recovery");
+    resetTestState();
+
+    deviceManager.setInstalled(DEV_TEMP_RTD, true);
+
+    // Establish healthy baseline with 3 good reads
+    sensorHealth.reportTemperatureOK(85.0);
+    sensorHealth.reportTemperatureOK(85.5);
+    sensorHealth.reportTemperatureOK(86.0);
+    sensorHealth.update();
+
+    TEST_ASSERT(sensorHealth.isTemperatureValid(),
+                "Temperature valid after 3 good reads");
+
+    // 2 failures (below threshold)
+    sensorHealth.reportTemperatureFail();
+    sensorHealth.reportTemperatureFail();
+    sensorHealth.update();
+
+    TEST_ASSERT(sensorHealth.isTemperatureValid(),
+                "Still valid after 2 failures (threshold is 3)");
+
+    // 3rd failure trips fault
+    sensorHealth.reportTemperatureFail();
+    sensorHealth.update();
+
+    TEST_ASSERT(!sensorHealth.isTemperatureValid(),
+                "Temperature faulted after 3 consecutive failures");
+
+    TEST_ASSERT(sensorHealth.getTemperatureHealth()->faulted,
+                "Temperature fault flag set");
+
+    TEST_ASSERT(deviceManager.isFaulted(DEV_TEMP_RTD),
+                "DeviceManager reports RTD faulted");
+
+    // Recovery: need 3 good reads
+    sensorHealth.reportTemperatureOK(85.0);
+    sensorHealth.reportTemperatureOK(85.0);
+    sensorHealth.update();
+
+    TEST_ASSERT(!sensorHealth.isTemperatureValid(),
+                "Still faulted after 2 good reads");
+
+    sensorHealth.reportTemperatureOK(85.0);
+    sensorHealth.update();
+
+    TEST_ASSERT(sensorHealth.isTemperatureValid(),
+                "Temperature recovered after 3 consecutive good reads");
+
+    TEST_ASSERT(!deviceManager.isFaulted(DEV_TEMP_RTD),
+                "DeviceManager reports RTD no longer faulted");
+}
+
+// ============================================================================
+// T13: VALVE FEEDBACK FAULT AND RECOVERY
+// ============================================================================
+
+void test_feedback_fault_recovery() {
+    TEST_BEGIN("T13: Valve Feedback Fault/Recovery");
+    resetTestState();
+
+    deviceManager.setInstalled(DEV_VALVE_FEEDBACK, true);
+
+    // Establish healthy baseline
+    sensorHealth.reportFeedbackOK(12.0);
+    sensorHealth.reportFeedbackOK(12.0);
+    sensorHealth.reportFeedbackOK(12.0);
+    sensorHealth.update();
+
+    TEST_ASSERT(sensorHealth.isFeedbackValid(),
+                "Feedback valid after 3 good reads");
+
+    // Trip fault with 3 failures
+    sensorHealth.reportFeedbackFail();
+    sensorHealth.reportFeedbackFail();
+    sensorHealth.reportFeedbackFail();
+    sensorHealth.update();
+
+    TEST_ASSERT(!sensorHealth.isFeedbackValid(),
+                "Feedback faulted after 3 consecutive failures");
+
+    TEST_ASSERT(deviceManager.isFaulted(DEV_VALVE_FEEDBACK),
+                "DeviceManager reports valve feedback faulted");
+
+    // Recover with 3 good reads
+    sensorHealth.reportFeedbackOK(12.0);
+    sensorHealth.reportFeedbackOK(12.0);
+    sensorHealth.reportFeedbackOK(12.0);
+    sensorHealth.update();
+
+    TEST_ASSERT(sensorHealth.isFeedbackValid(),
+                "Feedback recovered after 3 good reads");
+
+    TEST_ASSERT(!deviceManager.isFaulted(DEV_VALVE_FEEDBACK),
+                "DeviceManager reports valve feedback recovered");
+}
+
+// ============================================================================
+// T14: MULTIPLE CONCURRENT SENSOR FAULTS
+// ============================================================================
+
+void test_concurrent_faults() {
+    TEST_BEGIN("T14: Multiple Concurrent Sensor Faults");
+    resetTestState();
+
+    deviceManager.setInstalled(DEV_CONDUCTIVITY_PROBE, true);
+    deviceManager.setInstalled(DEV_TEMP_RTD, true);
+    deviceManager.setInstalled(DEV_VALVE_FEEDBACK, true);
+
+    // Establish all sensors healthy
+    sensorHealth.reportConductivityOK(2500.0);
+    sensorHealth.reportConductivityOK(2500.0);
+    sensorHealth.reportConductivityOK(2500.0);
+    sensorHealth.reportTemperatureOK(85.0);
+    sensorHealth.reportTemperatureOK(85.0);
+    sensorHealth.reportTemperatureOK(85.0);
+    sensorHealth.reportFeedbackOK(12.0);
+    sensorHealth.reportFeedbackOK(12.0);
+    sensorHealth.reportFeedbackOK(12.0);
+    sensorHealth.reportMeasurementCycle();
+    sensorHealth.update();
+
+    TEST_ASSERT(sensorHealth.isConductivityValid(), "Cond valid initially");
+    TEST_ASSERT(sensorHealth.isTemperatureValid(), "Temp valid initially");
+    TEST_ASSERT(sensorHealth.isFeedbackValid(), "Feedback valid initially");
+    TEST_ASSERT(!sensorHealth.isInSafeMode(), "Not in safe mode initially");
+
+    // Fail ALL sensors simultaneously
+    for (int i = 0; i < HEALTH_CONSECUTIVE_FAIL_LIMIT; i++) {
+        sensorHealth.reportConductivityFail();
+        sensorHealth.reportTemperatureFail();
+        sensorHealth.reportFeedbackFail();
+    }
+    sensorHealth.update();
+
+    TEST_ASSERT(!sensorHealth.isConductivityValid(), "Cond faulted");
+    TEST_ASSERT(!sensorHealth.isTemperatureValid(), "Temp faulted");
+    TEST_ASSERT(!sensorHealth.isFeedbackValid(), "Feedback faulted");
+
+    // Conductivity is a required device — safe mode should trigger
+    TEST_ASSERT(sensorHealth.isInSafeMode(),
+                "Safe mode entered when conductivity + others faulted");
+
+    uint8_t faulted = deviceManager.countFaulted();
+    TEST_ASSERT(faulted >= 3, "At least 3 devices faulted simultaneously");
+
+    Serial.printf("  Faulted devices: %d, Safe mode: %s\n",
+                  faulted, sensorHealth.getSafeModeString());
+}
+
+// ============================================================================
+// T15: DEVICE MANAGER BOUNDARY CHECKS
+// ============================================================================
+
+void test_boundary_checks() {
+    TEST_BEGIN("T15: DeviceManager Boundary Checks");
+    resetTestState();
+
+    // Test with invalid device ID (>= DEV_COUNT)
+    device_id_t invalid_id = (device_id_t)DEV_COUNT;
+    device_id_t large_id = (device_id_t)255;
+
+    TEST_ASSERT(!deviceManager.isEnabled(invalid_id),
+                "isEnabled(DEV_COUNT) returns false");
+
+    TEST_ASSERT(!deviceManager.isOperational(invalid_id),
+                "isOperational(DEV_COUNT) returns false");
+
+    TEST_ASSERT(!deviceManager.isRequired(invalid_id),
+                "isRequired(DEV_COUNT) returns false");
+
+    TEST_ASSERT(!deviceManager.isInstalled(invalid_id),
+                "isInstalled(DEV_COUNT) returns false");
+
+    TEST_ASSERT(deviceManager.getDeviceState(invalid_id) == DEVSTATE_DISABLED,
+                "getDeviceState(invalid) returns DISABLED");
+
+    TEST_ASSERT(strcmp(deviceManager.getStateString(invalid_id), "INVALID") == 0,
+                "getStateString(invalid) returns INVALID");
+
+    TEST_ASSERT(deviceManager.getDeviceInfo(invalid_id) == nullptr,
+                "getDeviceInfo(invalid) returns nullptr");
+
+    // isFaulted with invalid ID returns true (documented behavior)
+    // This is questionable — a non-existent device shouldn't appear faulted
+    bool faulted_result = deviceManager.isFaulted(invalid_id);
+    TEST_ASSERT(faulted_result == true,
+                "isFaulted(invalid) returns true (KNOWN ISSUE: should be false)");
+
+    // setEnabled with invalid ID returns false
+    TEST_ASSERT(!deviceManager.setEnabled(invalid_id, true),
+                "setEnabled(invalid) returns false");
+
+    TEST_ASSERT(!deviceManager.setEnabled(large_id, true),
+                "setEnabled(255) returns false");
+
+    // getFaultCount for invalid ID returns 0
+    TEST_ASSERT(deviceManager.getFaultCount(invalid_id) == 0,
+                "getFaultCount(invalid) returns 0");
+
+    // Operations on invalid IDs don't crash
+    deviceManager.reportFault(invalid_id);
+    deviceManager.reportOK(invalid_id);
+    deviceManager.clearFault(invalid_id);
+    deviceManager.setInstalled(invalid_id, true);
+    TEST_ASSERT(true, "Operations on invalid device IDs don't crash");
+}
+
+// ============================================================================
+// T16: SAFE MODE STALE_DATA ENTRY PATH
+// ============================================================================
+
+void test_safe_mode_stale_data() {
+    TEST_BEGIN("T16: Safe Mode STALE_DATA Entry");
+    resetTestState();
+
+    deviceManager.setInstalled(DEV_CONDUCTIVITY_PROBE, true);
+
+    // Start with valid measurements
+    sensorHealth.reportConductivityOK(2500.0);
+    sensorHealth.reportConductivityOK(2500.0);
+    sensorHealth.reportConductivityOK(2500.0);
+    sensorHealth.reportMeasurementCycle();
+    sensorHealth.update();
+
+    TEST_ASSERT(!sensorHealth.isInSafeMode(), "Not in safe mode initially");
+    TEST_ASSERT(sensorHealth.isMeasurementFresh(), "Measurement is fresh");
+
+    // Simulate measurement task stall: stop calling reportMeasurementCycle()
+    // and wait for stale threshold
+    Serial.println("  (Waiting for measurement stale threshold...)");
+    delay(HEALTH_STALE_READING_MS + 500);
+
+    sensorHealth.update();
+
+    TEST_ASSERT(!sensorHealth.isMeasurementFresh(),
+                "Measurement is now stale");
+
+    TEST_ASSERT(sensorHealth.isInSafeMode(),
+                "Safe mode entered due to stale data");
+
+    TEST_ASSERT(sensorHealth.getSafeMode() == SAFE_MODE_STALE_DATA,
+                "Safe mode reason is STALE_DATA");
+
+    Serial.printf("  Safe mode: %s, measurement age: %lu ms\n",
+                  sensorHealth.getSafeModeString(),
+                  sensorHealth.getMeasurementAge());
+}
+
+// ============================================================================
+// T17: UNKNOWN FEED MODE DEPENDENCY CHECK
+// ============================================================================
+
+void test_unknown_feed_mode() {
+    TEST_BEGIN("T17: Unknown Feed Mode Dependency Check");
+    resetTestState();
+
+    // Install all devices
+    for (int i = 0; i < DEV_COUNT; i++) {
+        deviceManager.setInstalled((device_id_t)i, true);
+    }
+
+    const char* dep = nullptr;
+
+    // Test known modes first
+    bool ok_mode_a = deviceManager.checkPumpModeDependency(0, 1, &dep);
+    TEST_ASSERT(ok_mode_a, "Mode A (blowdown feed) passes with all devices");
+
+    // Test unknown mode values — these silently pass (no switch case)
+    ok_mode_a = deviceManager.checkPumpModeDependency(0, 0, &dep);
+    TEST_ASSERT(ok_mode_a,
+                "Mode 0 (disabled/unknown) passes silently — no dependency");
+
+    bool ok_unknown = deviceManager.checkPumpModeDependency(0, 6, &dep);
+    TEST_ASSERT(ok_unknown,
+                "Mode 6 (undefined) passes silently (KNOWN GAP: should reject?)");
+
+    bool ok_large = deviceManager.checkPumpModeDependency(0, 255, &dep);
+    TEST_ASSERT(ok_large,
+                "Mode 255 (invalid) passes silently (KNOWN GAP)");
+
+    // Test with pump_id that maps outside DEV_COUNT
+    // pump_dev = DEV_PUMP_H2SO3 + pump_id = 4 + 10 = 14 >= DEV_COUNT
+    bool ok_bad_pump = deviceManager.checkPumpModeDependency(10, 1, &dep);
+    // With pump_id=10, pump_dev=14 which is >= DEV_COUNT
+    // isOperational(14) returns false, so dependency should fail
+    TEST_ASSERT(!ok_bad_pump,
+                "Invalid pump_id=10 fails dependency (pump_dev >= DEV_COUNT)");
+}
+
+// ============================================================================
+// T18: FAULT COUNTER NEAR LIMITS
+// ============================================================================
+
+void test_fault_counter_limits() {
+    TEST_BEGIN("T18: Fault Counter Near Limits");
+    resetTestState();
+
+    deviceManager.setInstalled(DEV_TEMP_RTD, true);
+
+    // Inject many faults to test counter behavior
+    for (uint32_t i = 0; i < 1000; i++) {
+        deviceManager.reportFault(DEV_TEMP_RTD);
+    }
+
+    TEST_ASSERT(deviceManager.isFaulted(DEV_TEMP_RTD),
+                "Device faulted after 1000 fault reports");
+
+    uint16_t fault_count = deviceManager.getFaultCount(DEV_TEMP_RTD);
+    TEST_ASSERT(fault_count == 1000,
+                "Fault count tracks correctly at 1000");
+
+    const device_info_t* info = deviceManager.getDeviceInfo(DEV_TEMP_RTD);
+    TEST_ASSERT(info != nullptr, "getDeviceInfo returns valid pointer");
+    TEST_ASSERT(info->total_faults == 1000,
+                "Total faults tracks correctly at 1000");
+
+    // A single reportOK resets fault_count to 0
+    deviceManager.reportOK(DEV_TEMP_RTD);
+    TEST_ASSERT(deviceManager.getFaultCount(DEV_TEMP_RTD) == 0,
+                "Fault count reset to 0 after single OK report");
+
+    // But total_faults is a lifetime counter — it stays
+    info = deviceManager.getDeviceInfo(DEV_TEMP_RTD);
+    TEST_ASSERT(info->total_faults == 1000,
+                "Total lifetime faults preserved after recovery");
+
+    // Device should be healthy again
+    TEST_ASSERT(!deviceManager.isFaulted(DEV_TEMP_RTD),
+                "Device recovered after OK report");
+}
+
+// ============================================================================
+// T19: TEMPERATURE SENTINEL VALUE DETECTION
+// ============================================================================
+
+void test_temperature_sentinel() {
+    TEST_BEGIN("T19: Temperature Sentinel Value Detection");
+    resetTestState();
+
+    deviceManager.setInstalled(DEV_TEMP_RTD, true);
+
+    // Establish healthy baseline
+    sensorHealth.reportTemperatureOK(85.0);
+    sensorHealth.reportTemperatureOK(85.0);
+    sensorHealth.reportTemperatureOK(85.0);
+    sensorHealth.update();
+
+    TEST_ASSERT(sensorHealth.isTemperatureValid(), "Temp valid initially");
+
+    // Report sentinel value (-999) — should be treated as fault
+    sensorHealth.reportTemperatureOK(-999.0);
+    const sensor_health_t* h = sensorHealth.getTemperatureHealth();
+    TEST_ASSERT(h->consecutive_failures > 0,
+                "Sentinel -999 increments failure count");
+
+    // Report value just above sentinel threshold (-998)
+    // The check is: value <= HEALTH_TEMP_SENTINEL + 1.0f = -998.0
+    sensorHealth.reportTemperatureOK(-998.0);
+    h = sensorHealth.getTemperatureHealth();
+    TEST_ASSERT(h->consecutive_failures > 1,
+                "Value -998 (at sentinel+1 boundary) treated as fault");
+
+    // Report value just above the boundary (-997) — should be accepted
+    // Reset first to have clean state
+    resetTestState();
+    deviceManager.setInstalled(DEV_TEMP_RTD, true);
+    sensorHealth.reportTemperatureOK(-997.0);
+    h = sensorHealth.getTemperatureHealth();
+    TEST_ASSERT(h->consecutive_failures == 0,
+                "Value -997 (above sentinel+1) treated as OK");
+
+    // NOTE: This means the sensor doesn't catch invalid temps like -50°C
+    // (short-circuit RTD). Only the -999/-998 sentinel range is rejected.
+    sensorHealth.reportTemperatureOK(-50.0);
+    h = sensorHealth.getTemperatureHealth();
+    TEST_ASSERT(h->consecutive_failures == 0,
+                "-50°C passes validation (KNOWN GAP: no range check)");
+
+    // Very high temps also pass (no upper bound validation)
+    sensorHealth.reportTemperatureOK(500.0);
+    h = sensorHealth.getTemperatureHealth();
+    TEST_ASSERT(h->consecutive_failures == 0,
+                "500°C passes validation (KNOWN GAP: no upper range check)");
+}
+
+// ============================================================================
+// T20: CONDUCTIVITY RANGE BOUNDARY VALUES
+// ============================================================================
+
+void test_conductivity_boundaries() {
+    TEST_BEGIN("T20: Conductivity Range Boundary Values");
+    resetTestState();
+
+    deviceManager.setInstalled(DEV_CONDUCTIVITY_PROBE, true);
+
+    // Reset to clean state
+    sensorHealth.reportConductivityOK(2500.0);
+    sensorHealth.reportConductivityOK(2500.0);
+    sensorHealth.reportConductivityOK(2500.0);
+    sensorHealth.update();
+    TEST_ASSERT(sensorHealth.isConductivityValid(), "Valid after baseline");
+
+    // Test exact minimum boundary (0.1 uS/cm) — should be valid
+    resetTestState();
+    deviceManager.setInstalled(DEV_CONDUCTIVITY_PROBE, true);
+    sensorHealth.reportConductivityOK(0.1);
+    const sensor_health_t* h = sensorHealth.getConductivityHealth();
+    TEST_ASSERT(h->consecutive_failures == 0,
+                "0.1 uS/cm (exact minimum) is accepted");
+
+    // Test just below minimum (0.09 uS/cm) — should be rejected
+    resetTestState();
+    deviceManager.setInstalled(DEV_CONDUCTIVITY_PROBE, true);
+    sensorHealth.reportConductivityOK(0.09);
+    h = sensorHealth.getConductivityHealth();
+    TEST_ASSERT(h->consecutive_failures > 0 || h->value_suspect,
+                "0.09 uS/cm (below minimum) is rejected");
+
+    // Test exact maximum boundary (15000 uS/cm) — should be valid
+    resetTestState();
+    deviceManager.setInstalled(DEV_CONDUCTIVITY_PROBE, true);
+    sensorHealth.reportConductivityOK(15000.0);
+    h = sensorHealth.getConductivityHealth();
+    TEST_ASSERT(h->consecutive_failures == 0,
+                "15000 uS/cm (exact maximum) is accepted");
+
+    // Test just above maximum (15001 uS/cm) — should be rejected
+    resetTestState();
+    deviceManager.setInstalled(DEV_CONDUCTIVITY_PROBE, true);
+    sensorHealth.reportConductivityOK(15001.0);
+    h = sensorHealth.getConductivityHealth();
+    TEST_ASSERT(h->consecutive_failures > 0 || h->value_suspect,
+                "15001 uS/cm (above maximum) is rejected");
+
+    // Test zero (0.0 uS/cm) — below minimum, should be rejected
+    resetTestState();
+    deviceManager.setInstalled(DEV_CONDUCTIVITY_PROBE, true);
+    sensorHealth.reportConductivityOK(0.0);
+    h = sensorHealth.getConductivityHealth();
+    TEST_ASSERT(h->consecutive_failures > 0 || h->value_suspect,
+                "0.0 uS/cm is rejected");
+
+    // Test negative value — should be rejected
+    resetTestState();
+    deviceManager.setInstalled(DEV_CONDUCTIVITY_PROBE, true);
+    sensorHealth.reportConductivityOK(-1.0);
+    h = sensorHealth.getConductivityHealth();
+    TEST_ASSERT(h->consecutive_failures > 0 || h->value_suspect,
+                "Negative conductivity is rejected");
+}
+
+// ============================================================================
+// T21: SAFE MODE HOLD TIME ENFORCEMENT
+// ============================================================================
+
+void test_safe_mode_hold_time() {
+    TEST_BEGIN("T21: Safe Mode Hold Time Enforcement");
+    resetTestState();
+
+    deviceManager.setInstalled(DEV_CONDUCTIVITY_PROBE, true);
+
+    // Trigger safe mode via sensor fault
+    sensorHealth.reportConductivityFail();
+    sensorHealth.reportConductivityFail();
+    sensorHealth.reportConductivityFail();
+    sensorHealth.update();
+
+    TEST_ASSERT(sensorHealth.isInSafeMode(), "Safe mode entered");
+
+    // Try to manually exit immediately — should be denied
+    sensorHealth.exitSafeMode();
+    TEST_ASSERT(sensorHealth.isInSafeMode(),
+                "Manual exit denied before hold time");
+
+    // Recover the sensor
+    sensorHealth.reportConductivityOK(2500.0);
+    sensorHealth.reportConductivityOK(2500.0);
+    sensorHealth.reportConductivityOK(2500.0);
+    sensorHealth.reportMeasurementCycle();
+
+    // update() should also deny auto-exit before hold time
+    sensorHealth.update();
+    TEST_ASSERT(sensorHealth.isInSafeMode(),
+                "Auto-exit denied before hold time even with recovered sensors");
+
+    // Wait for hold time to elapse
+    Serial.println("  (Waiting for safe mode hold time to elapse...)");
+    delay(HEALTH_SAFE_MODE_HOLD_MS + 500);
+
+    // Now manual exit should work
+    sensorHealth.exitSafeMode();
+    TEST_ASSERT(!sensorHealth.isInSafeMode(),
+                "Manual exit succeeds after hold time");
+}
+
+// ============================================================================
+// T22: DEVICE FAULT-CLEAR-REFAULT CYCLE
+// ============================================================================
+
+void test_fault_clear_refault() {
+    TEST_BEGIN("T22: Fault-Clear-Refault Cycle");
+    resetTestState();
+
+    deviceManager.setInstalled(DEV_PUMP_H2SO3, true);
+
+    TEST_ASSERT(deviceManager.isOperational(DEV_PUMP_H2SO3),
+                "Pump operational initially");
+
+    // First fault cycle
+    for (int i = 0; i < FAULT_CONSECUTIVE_THRESHOLD; i++) {
+        deviceManager.reportFault(DEV_PUMP_H2SO3);
+    }
+    TEST_ASSERT(deviceManager.isFaulted(DEV_PUMP_H2SO3),
+                "Pump faulted after first fault cycle");
+    TEST_ASSERT(!deviceManager.isOperational(DEV_PUMP_H2SO3),
+                "Pump not operational while faulted");
+
+    // Clear fault manually
+    deviceManager.clearFault(DEV_PUMP_H2SO3);
+    TEST_ASSERT(!deviceManager.isFaulted(DEV_PUMP_H2SO3),
+                "Pump cleared after clearFault()");
+    TEST_ASSERT(deviceManager.isOperational(DEV_PUMP_H2SO3),
+                "Pump operational after clearFault()");
+
+    // Second fault cycle — should fault again
+    for (int i = 0; i < FAULT_CONSECUTIVE_THRESHOLD; i++) {
+        deviceManager.reportFault(DEV_PUMP_H2SO3);
+    }
+    TEST_ASSERT(deviceManager.isFaulted(DEV_PUMP_H2SO3),
+                "Pump faulted again after second fault cycle");
+
+    // Recovery via reportOK
+    deviceManager.reportOK(DEV_PUMP_H2SO3);
+    TEST_ASSERT(deviceManager.isOperational(DEV_PUMP_H2SO3),
+                "Pump operational after reportOK()");
+
+    // Verify total_faults accumulated across cycles
+    const device_info_t* info = deviceManager.getDeviceInfo(DEV_PUMP_H2SO3);
+    TEST_ASSERT(info->total_faults == (FAULT_CONSECUTIVE_THRESHOLD * 2),
+                "Total faults accumulated across both cycles");
+}
+
+// ============================================================================
 // MAIN
 // ============================================================================
 
@@ -506,7 +1066,7 @@ void setup() {
     Serial.println("           SensorHealthMonitor");
     Serial.println("=============================================");
 
-    // Run all tests
+    // Run all tests — Original T1-T11
     test_probe_missing_at_boot();
     test_probe_intermittent();
     test_sensor_disabled();
@@ -518,6 +1078,19 @@ void setup() {
     test_safe_mode();
     test_zero_reading_rejection();
     test_status_reporting();
+
+    // New tests — T12-T22
+    test_temperature_fault_recovery();
+    test_feedback_fault_recovery();
+    test_concurrent_faults();
+    test_boundary_checks();
+    test_safe_mode_stale_data();
+    test_unknown_feed_mode();
+    test_fault_counter_limits();
+    test_temperature_sentinel();
+    test_conductivity_boundaries();
+    test_safe_mode_hold_time();
+    test_fault_clear_refault();
 
     // Summary
     Serial.println();
