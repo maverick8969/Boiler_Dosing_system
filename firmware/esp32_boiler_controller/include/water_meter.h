@@ -125,6 +125,9 @@ private:
     uint32_t _last_query_pulse_count;
     float _last_query_volume;
 
+    // Totalizer: volume at last update() (independent of getVolumeSinceLast)
+    float _last_update_volume;
+
     // Debouncing
     uint32_t _debounce_time;
 

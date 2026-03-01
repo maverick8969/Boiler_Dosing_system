@@ -4,6 +4,7 @@
  */
 
 #include "web_server.h"
+#include "ph_estimator.h"
 #include "device_manager.h"
 #include "sensor_health.h"
 #include "self_test.h"
@@ -89,6 +90,52 @@ void BoilerWebServer::updateReadings(float conductivity, float temperature, floa
 
 void BoilerWebServer::updateFuzzyOutput(const fuzzy_result_t& result) {
     _current_fuzzy_result = result;
+}
+
+void BoilerWebServer::checkManualTestExpiry() {
+    if (!_config || !_fuzzy) return;
+
+    uint16_t timeout_min = _config->fuzzy.manual_input_timeout;
+    if (timeout_min == 0) return;  // Disabled
+
+    const uint32_t timeout_ms = (uint32_t)timeout_min * 60000;
+    const fuzzy_input_t param_map[] = {
+        FUZZY_IN_TDS, FUZZY_IN_ALKALINITY, FUZZY_IN_SULFITE, FUZZY_IN_PH
+    };
+
+    uint32_t now = millis();
+    for (int i = 0; i < 4; i++) {
+        if (_manual_tests[i].valid && (now - _manual_tests[i].timestamp) > timeout_ms) {
+            _manual_tests[i].valid = false;
+            _fuzzy->setManualInput(param_map[i], _manual_tests[i].value, false);
+            if (_test_input_callback) {
+                _test_input_callback(param_map[i], _manual_tests[i].value, false);
+            }
+        }
+    }
+    // P-alkalinity [4]: expire validity only (no fuzzy input)
+    if (_manual_tests[4].valid && (now - _manual_tests[4].timestamp) > timeout_ms) {
+        _manual_tests[4].valid = false;
+    }
+}
+
+void BoilerWebServer::applyEstimatedPhIfNeeded() {
+    if (!_fuzzy) return;
+    // If manual pH is set, fuzzy already has it
+    if (_manual_tests[3].valid) return;
+    // Otherwise try estimate from P- and M-alkalinity
+    if (!_manual_tests[1].valid || !_manual_tests[4].valid) {
+        _fuzzy->setManualInput(FUZZY_IN_PH, 0, false);
+        return;
+    }
+    float M_ppm = _manual_tests[1].value;
+    float P_ppm = _manual_tests[4].value;
+    float est_pH = 0.0f;
+    if (estimate_pH_from_alkalinity(P_ppm, M_ppm, &est_pH, nullptr, 0)) {
+        _fuzzy->setManualInput(FUZZY_IN_PH, est_pH, true);
+    } else {
+        _fuzzy->setManualInput(FUZZY_IN_PH, 0, false);
+    }
 }
 
 // ============================================================================
@@ -180,6 +227,11 @@ void BoilerWebServer::handleGetStatus() {
     tests["ph"]["valid"] = _manual_tests[3].valid;
     tests["ph"]["age_min"] = _manual_tests[3].valid ?
         (millis() - _manual_tests[3].timestamp) / 60000 : -1;
+
+    tests["p_alkalinity"]["value"] = _manual_tests[4].value;
+    tests["p_alkalinity"]["valid"] = _manual_tests[4].valid;
+    tests["p_alkalinity"]["age_min"] = _manual_tests[4].valid ?
+        (millis() - _manual_tests[4].timestamp) / 60000 : -1;
 
     String response;
     serializeJson(doc, response);
@@ -429,6 +481,17 @@ void BoilerWebServer::handlePostTest() {
         }
     }
 
+    // Update P-alkalinity (ppm as CaCO3, for pH estimate when M-alk also set)
+    if (doc.containsKey("p_alkalinity")) {
+        float value = doc["p_alkalinity"].as<float>();
+        if (value >= 0 && value <= 2000) {
+            _manual_tests[4].value = value;
+            _manual_tests[4].timestamp = millis();
+            _manual_tests[4].valid = true;
+            updated = true;
+        }
+    }
+
     if (updated) {
         _server.send(200, "application/json", "{\"success\":true}");
     } else {
@@ -443,23 +506,28 @@ void BoilerWebServer::handleGetTests() {
 
     doc["tds"]["value"] = _manual_tests[0].value;
     doc["tds"]["valid"] = _manual_tests[0].valid;
-    doc["tds"]["age_minutes"] = _manual_tests[0].valid ?
+    doc["tds"]["age_min"] = _manual_tests[0].valid ?
         (millis() - _manual_tests[0].timestamp) / 60000 : -1;
 
     doc["alkalinity"]["value"] = _manual_tests[1].value;
     doc["alkalinity"]["valid"] = _manual_tests[1].valid;
-    doc["alkalinity"]["age_minutes"] = _manual_tests[1].valid ?
+    doc["alkalinity"]["age_min"] = _manual_tests[1].valid ?
         (millis() - _manual_tests[1].timestamp) / 60000 : -1;
 
     doc["sulfite"]["value"] = _manual_tests[2].value;
     doc["sulfite"]["valid"] = _manual_tests[2].valid;
-    doc["sulfite"]["age_minutes"] = _manual_tests[2].valid ?
+    doc["sulfite"]["age_min"] = _manual_tests[2].valid ?
         (millis() - _manual_tests[2].timestamp) / 60000 : -1;
 
     doc["ph"]["value"] = _manual_tests[3].value;
     doc["ph"]["valid"] = _manual_tests[3].valid;
-    doc["ph"]["age_minutes"] = _manual_tests[3].valid ?
+    doc["ph"]["age_min"] = _manual_tests[3].valid ?
         (millis() - _manual_tests[3].timestamp) / 60000 : -1;
+
+    doc["p_alkalinity"]["value"] = _manual_tests[4].value;
+    doc["p_alkalinity"]["valid"] = _manual_tests[4].valid;
+    doc["p_alkalinity"]["age_min"] = _manual_tests[4].valid ?
+        (millis() - _manual_tests[4].timestamp) / 60000 : -1;
 
     String response;
     serializeJson(doc, response);
@@ -469,7 +537,7 @@ void BoilerWebServer::handleGetTests() {
 void BoilerWebServer::handleClearTests() {
     sendCORSHeaders();
 
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 5; i++) {
         _manual_tests[i].valid = false;
     }
 
@@ -511,20 +579,31 @@ String BoilerWebServer::generateIndexHTML() {
     <div class="container">
         <header>
             <h1>Boiler Water Test Entry</h1>
-            <div class="status-bar">
-                <span id="wifi-status" class="status-indicator">●</span>
+            <div class="status-bar" role="status" aria-live="polite" aria-atomic="true">
+                <span id="wifi-status" class="status-indicator" aria-hidden="true">●</span>
                 <span id="connection-text">Connecting...</span>
+                <span id="system-status" class="system-status" aria-live="polite"></span>
             </div>
         </header>
 
         <!-- Sensor Reading -->
         <section class="card">
             <h2>Sensor Reading</h2>
-            <div class="readings-grid single">
-                <div class="reading">
+            <div class="readings-grid three">
+                <div class="reading" id="reading-temp">
                     <span class="label">Temperature</span>
                     <span class="value" id="temperature">--</span>
                     <span class="unit">°C</span>
+                </div>
+                <div class="reading" id="reading-cond">
+                    <span class="label">Conductivity</span>
+                    <span class="value" id="conductivity">--</span>
+                    <span class="unit">µS/cm</span>
+                </div>
+                <div class="reading" id="reading-flow">
+                    <span class="label">Flow</span>
+                    <span class="value" id="flow-rate">--</span>
+                    <span class="unit">L/min</span>
                 </div>
             </div>
         </section>
@@ -532,32 +611,33 @@ String BoilerWebServer::generateIndexHTML() {
         <!-- Manual Test Entry -->
         <section class="card">
             <h2>Enter Test Results</h2>
-            <form id="test-form">
+            <form id="test-form" aria-describedby="form-error">
+                <div id="form-error" class="form-error" role="alert" aria-live="polite" aria-atomic="true"></div>
                 <div class="input-group">
                     <label for="tds">TDS (ppm)</label>
                     <input type="number" id="tds" name="tds"
-                           min="0" max="5000" step="1" placeholder="e.g., 2500">
+                           min="0" max="5000" step="1" placeholder="e.g., 2500" aria-describedby="tds-age form-error">
                     <span class="test-age" id="tds-age"></span>
                 </div>
 
                 <div class="input-group">
                     <label for="alkalinity">Alkalinity (ppm CaCO₃)</label>
                     <input type="number" id="alkalinity" name="alkalinity"
-                           min="0" max="1000" step="1" placeholder="e.g., 350">
+                           min="0" max="1000" step="1" placeholder="e.g., 350" aria-describedby="alk-age form-error">
                     <span class="test-age" id="alk-age"></span>
                 </div>
 
                 <div class="input-group">
                     <label for="sulfite">Sulfite (ppm SO₃)</label>
                     <input type="number" id="sulfite" name="sulfite"
-                           min="0" max="100" step="1" placeholder="e.g., 30">
+                           min="0" max="100" step="1" placeholder="e.g., 30" aria-describedby="sulf-age form-error">
                     <span class="test-age" id="sulf-age"></span>
                 </div>
 
                 <div class="input-group">
                     <label for="ph">pH</label>
                     <input type="number" id="ph" name="ph"
-                           min="7" max="14" step="0.1" placeholder="e.g., 11.0">
+                           min="7" max="14" step="0.1" placeholder="e.g., 11.0" aria-describedby="ph-age form-error">
                     <span class="test-age" id="ph-age"></span>
                 </div>
 
@@ -577,29 +657,29 @@ String BoilerWebServer::generateIndexHTML() {
             </div>
             <div class="output-grid">
                 <div class="output">
-                    <span class="output-label">Blowdown <span class="rec-badge">REC</span></span>
-                    <div class="progress-bar">
+                    <span class="output-label" id="blowdown-label">Blowdown <span class="rec-badge">REC</span></span>
+                    <div class="progress-bar" role="progressbar" aria-labelledby="blowdown-label" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">
                         <div class="progress" id="blowdown-bar" style="width: 0%"></div>
                     </div>
                     <span class="output-value" id="blowdown-val">0%</span>
                 </div>
                 <div class="output">
-                    <span class="output-label">Caustic (NaOH)</span>
-                    <div class="progress-bar">
+                    <span class="output-label" id="caustic-label">Caustic (NaOH)</span>
+                    <div class="progress-bar" role="progressbar" aria-labelledby="caustic-label" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">
                         <div class="progress caustic" id="caustic-bar" style="width: 0%"></div>
                     </div>
                     <span class="output-value" id="caustic-val">0%</span>
                 </div>
                 <div class="output">
-                    <span class="output-label">Sulfite</span>
-                    <div class="progress-bar">
+                    <span class="output-label" id="sulfite-label">Sulfite</span>
+                    <div class="progress-bar" role="progressbar" aria-labelledby="sulfite-label" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">
                         <div class="progress sulfite" id="sulfite-bar" style="width: 0%"></div>
                     </div>
                     <span class="output-value" id="sulfite-val">0%</span>
                 </div>
                 <div class="output">
-                    <span class="output-label">Acid</span>
-                    <div class="progress-bar">
+                    <span class="output-label" id="acid-label">Acid</span>
+                    <div class="progress-bar" role="progressbar" aria-labelledby="acid-label" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">
                         <div class="progress acid" id="acid-bar" style="width: 0%"></div>
                     </div>
                     <span class="output-value" id="acid-val">0%</span>
@@ -614,6 +694,7 @@ String BoilerWebServer::generateIndexHTML() {
         <section class="card collapsed">
             <h2 onclick="toggleCard(this)">Target Ranges ▼</h2>
             <div class="card-content">
+                <p class="reference-note">Reference only. Targets come from controller config.</p>
                 <table class="reference-table">
                     <tr><th>Parameter</th><th>Target</th><th>Range</th></tr>
                     <tr><td>TDS</td><td id="sp-tds">2500</td><td>2000-3000 ppm</td></tr>
@@ -678,6 +759,7 @@ header h1 {
     display: flex;
     align-items: center;
     justify-content: center;
+    flex-wrap: wrap;
     gap: 6px;
 }
 .status-indicator {
@@ -686,6 +768,10 @@ header h1 {
 }
 .status-indicator.online { color: #4CAF50; text-shadow: 0 0 10px #4CAF50; }
 .status-indicator.offline { color: #f44336; animation: none; }
+.status-indicator.degraded { color: #FF9800; text-shadow: 0 0 8px #FF9800; }
+.system-status { display: block; width: 100%; font-size: 0.75em; margin-top: 4px; }
+.system-status.degraded { color: #FF9800; }
+.system-status.normal { color: #888; }
 
 .card {
     background: linear-gradient(145deg, rgba(30,40,70,0.9) 0%, rgba(20,30,50,0.95) 100%);
@@ -730,6 +816,15 @@ header h1 {
     max-width: 200px;
     margin: 0 auto;
 }
+.readings-grid.three {
+    grid-template-columns: repeat(3, 1fr);
+    max-width: 100%;
+}
+@media (max-width: 400px) {
+    .readings-grid.three { grid-template-columns: 1fr; }
+}
+.reading.invalid .value { color: #f44336; -webkit-text-fill-color: #f44336; }
+.reading.stale .value { color: #FF9800; -webkit-text-fill-color: #FF9800; }
 .reading {
     text-align: center;
     padding: 20px 12px;
@@ -810,6 +905,18 @@ header h1 {
 }
 .test-age.stale { color: #ff9800; }
 .test-age.expired { color: #f44336; }
+
+.form-error {
+    font-size: 0.85em;
+    color: #f44336;
+    margin-bottom: 12px;
+    min-height: 1.2em;
+}
+.reference-note {
+    font-size: 0.75em;
+    color: #666;
+    margin-bottom: 8px;
+}
 
 .button-group {
     display: flex;
@@ -1003,6 +1110,7 @@ String BoilerWebServer::generateJS() {
     return R"rawliteral(
 let connected = false;
 let toastTimeout = null;
+const FETCH_TIMEOUT_MS = 15000;
 
 // Toast notification system
 function showToast(message, type = 'info') {
@@ -1011,6 +1119,9 @@ function showToast(message, type = 'info') {
         toast = document.createElement('div');
         toast.id = 'toast';
         toast.className = 'toast';
+        toast.setAttribute('role', 'status');
+        toast.setAttribute('aria-live', 'polite');
+        toast.setAttribute('aria-atomic', 'true');
         document.body.appendChild(toast);
     }
 
@@ -1046,18 +1157,78 @@ function animateValue(elem, newValue, suffix = '') {
     requestAnimationFrame(animate);
 }
 
+function setSensorsOffline() {
+    document.getElementById('temperature').textContent = '--';
+    document.getElementById('conductivity').textContent = '--';
+    document.getElementById('flow-rate').textContent = '--';
+    ['reading-temp', 'reading-cond', 'reading-flow'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) { el.classList.remove('stale', 'invalid'); }
+    });
+    const sysStatus = document.getElementById('system-status');
+    if (sysStatus) { sysStatus.textContent = ''; sysStatus.className = 'system-status'; }
+}
+
 async function fetchStatus() {
+    const textEl = document.getElementById('connection-text');
+    if (!connected && textEl) textEl.textContent = 'Reconnecting...';
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+
     try {
-        const res = await fetch('/api/status');
+        const res = await fetch('/api/status', { signal: controller.signal });
+        clearTimeout(timeoutId);
         const data = await res.json();
 
-        // Animate temperature update (only sensor reading)
-        const tempElem = document.getElementById('temperature');
+        const health = data.health || {};
+        const tempValid = health.temp_valid !== false;
+        const condValid = health.cond_valid !== false;
 
-        if (tempElem.textContent !== '--') {
-            animateValue(tempElem, data.temperature);
+        // System status / safe mode
+        const sysStatus = document.getElementById('system-status');
+        if (sysStatus) {
+            if (health.in_safe_mode && health.safe_mode) {
+                sysStatus.textContent = 'Safe mode: ' + health.safe_mode;
+                sysStatus.className = 'system-status degraded';
+            } else {
+                sysStatus.textContent = 'Normal';
+                sysStatus.className = 'system-status normal';
+            }
+        }
+
+        // Temperature: show value only if valid, else -- or Stale
+        const tempElem = document.getElementById('temperature');
+        const tempReading = document.getElementById('reading-temp');
+        if (tempValid) {
+            if (tempElem.textContent !== '--') {
+                animateValue(tempElem, data.temperature);
+            } else {
+                tempElem.textContent = data.temperature.toFixed(1);
+            }
+            if (tempReading) { tempReading.classList.remove('stale', 'invalid'); }
         } else {
-            tempElem.textContent = data.temperature.toFixed(1);
+            tempElem.textContent = '--';
+            if (tempReading) tempReading.classList.add('invalid');
+        }
+
+        // Conductivity
+        const condElem = document.getElementById('conductivity');
+        const condReading = document.getElementById('reading-cond');
+        if (condElem) {
+            condElem.textContent = (data.conductivity != null) ? Number(data.conductivity).toFixed(0) : '--';
+            if (condReading) {
+                condReading.classList.toggle('invalid', !condValid);
+                condReading.classList.toggle('stale', condValid && health.conductivity && health.conductivity.stale);
+            }
+        }
+
+        // Flow rate
+        const flowElem = document.getElementById('flow-rate');
+        const flowReading = document.getElementById('reading-flow');
+        if (flowElem) {
+            flowElem.textContent = (data.flow_rate != null) ? Number(data.flow_rate).toFixed(2) : '--';
+            if (flowReading) flowReading.classList.remove('stale', 'invalid');
         }
 
         // Update test ages with styling
@@ -1086,9 +1257,12 @@ async function fetchStatus() {
         }
 
         if (!connected) showToast('Connected to controller', 'success');
-        setConnected(true);
+        setConnected(true, health.in_safe_mode === true);
     } catch (e) {
-        if (connected) showToast('Connection lost', 'error');
+        clearTimeout(timeoutId);
+        if (e.name === 'AbortError') showToast('Connection timed out', 'error');
+        else if (connected) showToast('Connection lost', 'error');
+        setSensorsOffline();
         setConnected(false);
     }
 }
@@ -1116,12 +1290,18 @@ async function fetchFuzzy() {
 
         document.getElementById('active-rules').textContent = data.active_rules;
 
-        // Update setpoints
+        // Update setpoints (show — when config not loaded)
+        const spIds = ['sp-tds', 'sp-alk', 'sp-sulf', 'sp-ph'];
         if (data.setpoints) {
             document.getElementById('sp-tds').textContent = data.setpoints.tds;
             document.getElementById('sp-alk').textContent = data.setpoints.alkalinity;
             document.getElementById('sp-sulf').textContent = data.setpoints.sulfite;
             document.getElementById('sp-ph').textContent = data.setpoints.ph;
+        } else {
+            spIds.forEach(id => {
+                const el = document.getElementById(id);
+                if (el) el.textContent = '\u2014';
+            });
         }
     } catch (e) {
         console.error('Fuzzy fetch error:', e);
@@ -1131,12 +1311,14 @@ async function fetchFuzzy() {
 function setOutput(name, value) {
     const bar = document.getElementById(name + '-bar');
     const val = document.getElementById(name + '-val');
+    const pct = Math.round(Number(value) || 0);
 
-    bar.style.width = value + '%';
-    animateValue(val, value, '%');
+    bar.style.width = pct + '%';
+    const progressBar = bar.closest('.progress-bar');
+    if (progressBar) progressBar.setAttribute('aria-valuenow', pct);
+    animateValue(val, pct, '%');
 
-    // Add glow effect for high values
-    if (value > 70) {
+    if (pct > 70) {
         bar.style.boxShadow = '0 0 15px currentColor';
     } else {
         bar.style.boxShadow = '';
@@ -1167,28 +1349,36 @@ function updateTestAge(elemId, test) {
     }
 }
 
-function setConnected(state) {
+function setConnected(state, degraded) {
     connected = state;
     const indicator = document.getElementById('wifi-status');
     const text = document.getElementById('connection-text');
-    if (state) {
-        indicator.className = 'status-indicator online';
-        text.textContent = 'Connected';
-    } else {
+    if (!state) {
         indicator.className = 'status-indicator offline';
         text.textContent = 'Disconnected';
+    } else if (degraded) {
+        indicator.className = 'status-indicator degraded';
+        text.textContent = 'Degraded';
+    } else {
+        indicator.className = 'status-indicator online';
+        text.textContent = 'Connected';
     }
 }
 
 document.getElementById('test-form').addEventListener('submit', async (e) => {
     e.preventDefault();
 
-    const btn = e.target.querySelector('.btn-primary');
+    const form = e.target;
+    const formError = document.getElementById('form-error');
+    const btn = form.querySelector('.btn-primary');
     const data = {};
     const tds = document.getElementById('tds').value;
     const alk = document.getElementById('alkalinity').value;
     const sulf = document.getElementById('sulfite').value;
     const ph = document.getElementById('ph').value;
+
+    if (formError) formError.textContent = '';
+    form.setAttribute('aria-invalid', 'false');
 
     if (tds) data.tds = parseFloat(tds);
     if (alk) data.alkalinity = parseFloat(alk);
@@ -1196,11 +1386,12 @@ document.getElementById('test-form').addEventListener('submit', async (e) => {
     if (ph) data.ph = parseFloat(ph);
 
     if (Object.keys(data).length === 0) {
+        if (formError) formError.textContent = 'Enter at least one test value.';
+        form.setAttribute('aria-invalid', 'true');
         showToast('Enter at least one test value', 'error');
         return;
     }
 
-    // Button loading state
     btn.disabled = true;
     btn.textContent = 'Submitting...';
 
@@ -1211,10 +1402,17 @@ document.getElementById('test-form').addEventListener('submit', async (e) => {
             body: JSON.stringify(data)
         });
 
+        let errMsg = '';
+        if (!res.ok) {
+            const errBody = await res.json().catch(() => ({}));
+            errMsg = errBody.error || '';
+        }
+
         if (res.ok) {
             btn.textContent = 'Submitted!';
             btn.classList.add('success');
             showToast('Test results saved successfully', 'success');
+            if (formError) formError.textContent = '';
 
             setTimeout(() => {
                 btn.textContent = 'Submit Tests';
@@ -1225,18 +1423,30 @@ document.getElementById('test-form').addEventListener('submit', async (e) => {
             fetchStatus();
             fetchFuzzy();
         } else {
-            throw new Error('Server error');
+            const msg = res.status >= 500 ? 'Server error' : (errMsg || 'Invalid input');
+            if (formError) formError.textContent = msg;
+            form.setAttribute('aria-invalid', 'true');
+            showToast(msg, 'error');
+            btn.textContent = 'Submit Tests';
+            btn.disabled = false;
         }
     } catch (err) {
+        const msg = 'Connection error';
+        if (formError) formError.textContent = msg;
+        form.setAttribute('aria-invalid', 'true');
+        showToast(msg, 'error');
         btn.textContent = 'Submit Tests';
         btn.disabled = false;
-        showToast('Error submitting tests', 'error');
     }
 });
 
 async function clearTests() {
-    // Custom confirm dialog would be better, but keeping simple for ESP32
     if (!confirm('Clear all manual test values?')) return;
+
+    const formError = document.getElementById('form-error');
+    const form = document.getElementById('test-form');
+    if (formError) formError.textContent = '';
+    if (form) form.setAttribute('aria-invalid', 'false');
 
     try {
         await fetch('/api/tests', { method: 'DELETE' });

@@ -76,6 +76,19 @@ public:
      */
     void updateFuzzyOutput(const fuzzy_result_t& result);
 
+    /**
+     * @brief Check manual test age and expire entries when past manual_input_timeout (minutes).
+     * Call periodically from main loop/task. When timeout > 0 and age exceeds it, sets valid=false
+     * and updates fuzzy controller.
+     */
+    void checkManualTestExpiry();
+
+    /**
+     * @brief When manual pH is not set, compute pH from P/M alkalinity if both valid (per .md).
+     * Call after checkManualTestExpiry(). Updates fuzzy PH input when estimate is reliable.
+     */
+    void applyEstimatedPhIfNeeded();
+
 private:
     WebServer _server;
     system_config_t* _config;
@@ -94,7 +107,7 @@ private:
         float value;
         uint32_t timestamp;     // millis() when entered
         bool valid;
-    } _manual_tests[4];         // [0]=TDS, [1]=Alk, [2]=Sulfite, [3]=pH
+    } _manual_tests[5];         // [0]=TDS, [1]=M-alk, [2]=Sulfite, [3]=pH, [4]=P-alk (for pH estimate)
 
     // Callback
     void (*_test_input_callback)(fuzzy_input_t, float, bool);

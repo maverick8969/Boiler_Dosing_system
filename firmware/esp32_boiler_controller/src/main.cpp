@@ -81,6 +81,12 @@ TaskHandle_t taskMeasurement = NULL;
 TaskHandle_t taskDisplay = NULL;
 TaskHandle_t taskLogging = NULL;
 
+// Conductivity history for trend (rate of change µS/cm per minute)
+#define COND_HISTORY_MIN_MS 60000   // Min 1 minute between samples for trend
+static float s_cond_history_value = 0.0f;
+static uint32_t s_cond_history_time = 0;
+static bool s_cond_history_valid = false;
+
 // ============================================================================
 // FUNCTION DECLARATIONS
 // ============================================================================
@@ -436,11 +442,24 @@ void taskControlLoop(void* parameter) {
         uint32_t water_contacts = waterMeterManager.getContactsSinceLast(2);  // Both meters
         float water_volume = waterMeterManager.getVolumeSinceLast(2);
 
+        // Conductivity trend (µS/cm per minute)
+        float cond_trend = 0.0f;
+        uint32_t now_ms = millis();
+        if (s_cond_history_valid && (now_ms - s_cond_history_time) >= COND_HISTORY_MIN_MS) {
+            float dt_min = (now_ms - s_cond_history_time) / 60000.0f;
+            if (dt_min > 0.0f) {
+                cond_trend = (conductivity - s_cond_history_value) / dt_min;
+            }
+        }
+        s_cond_history_value = conductivity;
+        s_cond_history_time = now_ms;
+        s_cond_history_valid = true;
+
         // Build fuzzy inputs from current readings and manual test values
         fuzzy_inputs_t fuzzy_inputs;
         fuzzy_inputs.conductivity = conductivity;
         fuzzy_inputs.temperature = temperature_c;
-        fuzzy_inputs.cond_trend = 0.0f;  // TODO: Calculate from history
+        fuzzy_inputs.cond_trend = cond_trend;
         // Manual inputs are set via web UI or LCD menu through fuzzyController.setManualInput()
         fuzzy_inputs.alkalinity = 0.0f;
         fuzzy_inputs.sulfite = 0.0f;
@@ -460,6 +479,25 @@ void taskControlLoop(void* parameter) {
         fuzzy_rates[PUMP_H2SO3] = fuzzy_result.acid_rate;
         fuzzy_rates[PUMP_NAOH] = fuzzy_result.caustic_rate;
         fuzzy_rates[PUMP_AMINE] = fuzzy_result.sulfite_rate;
+
+        // Clamp rates so effective ml/min does not exceed configured max (Mode F)
+        float flow_gal_per_min = waterMeterManager.getCombinedFlowRate();
+        const float max_ml_min[] = {
+            systemConfig.fuzzy.acid_max_ml_min,
+            systemConfig.fuzzy.caustic_max_ml_min,
+            systemConfig.fuzzy.sulfite_max_ml_min
+        };
+        if (flow_gal_per_min > 0.01f) {
+            for (int i = 0; i < PUMP_COUNT; i++) {
+                float ml_per_gal = systemConfig.pumps[i].ml_per_gallon_at_100pct;
+                if (ml_per_gal > 0 && max_ml_min[i] > 0) {
+                    float max_pct = 100.0f * max_ml_min[i] / (flow_gal_per_min * ml_per_gal);
+                    if (max_pct < 100.0f && fuzzy_rates[i] > max_pct) {
+                        fuzzy_rates[i] = max_pct;
+                    }
+                }
+            }
+        }
 
         // Process pump feed modes with fuzzy rates for Mode F
         pumpManager.processFeedModes(
@@ -560,10 +598,12 @@ void taskLoggingLoop(void* parameter) {
 
         // Service web server requests (AP + STA clients)
         webServer.handleClient();
+        webServer.checkManualTestExpiry();
+        webServer.applyEstimatedPhIfNeeded();
         webServer.updateReadings(
             systemState.conductivity_calibrated,
             systemState.temperature_celsius,
-            0.0f  // TODO: flow_rate from water meter
+            waterMeterManager.getCombinedFlowRate()
         );
 
         // Log sensor data at configured interval
@@ -694,6 +734,25 @@ void initializeDefaults() {
     systemConfig.alarms.blowdown_timeout_enabled = true;
     systemConfig.alarms.feed_timeout_enabled = true;
     systemConfig.alarms.sensor_error_enabled = true;
+
+    // Fuzzy logic defaults
+    systemConfig.fuzzy.enabled = false;
+    systemConfig.fuzzy.cond_setpoint = FUZZY_DEFAULT_COND_SETPOINT;
+    systemConfig.fuzzy.alk_setpoint = FUZZY_DEFAULT_ALK_SETPOINT;
+    systemConfig.fuzzy.sulfite_setpoint = FUZZY_DEFAULT_SULFITE_SETPOINT;
+    systemConfig.fuzzy.ph_setpoint = FUZZY_DEFAULT_PH_SETPOINT;
+    systemConfig.fuzzy.cond_deadband = FUZZY_DEFAULT_COND_DEADBAND;
+    systemConfig.fuzzy.alk_deadband = FUZZY_DEFAULT_ALK_DEADBAND;
+    systemConfig.fuzzy.sulfite_deadband = FUZZY_DEFAULT_SULFITE_DEADBAND;
+    systemConfig.fuzzy.ph_deadband = FUZZY_DEFAULT_PH_DEADBAND;
+    systemConfig.fuzzy.blowdown_max_sec = 60.0f;
+    systemConfig.fuzzy.caustic_max_ml_min = 10.0f;
+    systemConfig.fuzzy.sulfite_max_ml_min = 5.0f;
+    systemConfig.fuzzy.acid_max_ml_min = 5.0f;
+    systemConfig.fuzzy.aggressive_mode = false;
+    systemConfig.fuzzy.inference_method = 0;
+    systemConfig.fuzzy.defuzz_method = 0;
+    systemConfig.fuzzy.manual_input_timeout = 1440;  // 24 h in minutes; 0 = never expire
 
     // Network defaults
     systemConfig.tsdb_port = TSDB_HTTP_PORT;

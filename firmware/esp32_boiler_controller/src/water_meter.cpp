@@ -29,6 +29,7 @@ WaterMeter::WaterMeter(uint8_t pin, uint8_t meter_id)
     , _flow_rate(0)
     , _last_query_pulse_count(0)
     , _last_query_volume(0)
+    , _last_update_volume(0)
     , _debounce_time(WATER_METER_DEBOUNCE_MS)
 {
 }
@@ -49,10 +50,11 @@ void WaterMeter::configure(water_meter_config_t* config) {
     _config = config;
 
     if (_config) {
-        // Load totalizer from config
+        // Load totalizer from config (persisted value)
         _pulse_count = 0;  // Pulses since boot
         _last_query_pulse_count = 0;
         _last_query_volume = 0;
+        _last_update_volume = 0;
     }
 }
 
@@ -81,16 +83,18 @@ void WaterMeter::update() {
         _last_flow_calc_time = now;
     }
 
-    // Update totalizer
+    // Update totalizer (independent of getVolumeSinceLast)
     if (_config) {
         float current_volume = pulsesToVolume(_pulse_count);
-        uint32_t volume_delta = (uint32_t)(current_volume - _last_query_volume);
-        _config->totalizer += volume_delta;
-
-        // Wrap at maximum
-        if (_config->totalizer > METER_TOTALIZER_MAX) {
-            _config->totalizer = 0;
+        float volume_delta = current_volume - _last_update_volume;
+        if (volume_delta > 0) {
+            _config->totalizer += (uint32_t)volume_delta;
+            // Wrap at maximum
+            if (_config->totalizer > METER_TOTALIZER_MAX) {
+                _config->totalizer = 0;
+            }
         }
+        _last_update_volume = current_volume;
     }
 }
 
@@ -133,6 +137,7 @@ void WaterMeter::resetTotal() {
     _pulse_count = 0;
     _last_query_pulse_count = 0;
     _last_query_volume = 0;
+    _last_update_volume = 0;
     _last_flow_pulse_count = 0;
 }
 

@@ -154,47 +154,51 @@ void FuzzyController::initOutputVariables() {
 void FuzzyController::updateMembershipFunctions() {
     if (!_config) return;
 
-    float sp, db;
+    float sp, db, db_eff;
 
     // TDS membership functions (centered on setpoint)
     // Note: Config uses cond_setpoint for TDS target (ppm)
     sp = _config->cond_setpoint;
     db = _config->cond_deadband;
+    db_eff = (db * 2.0f > 1.0f) ? db : 0.5f;  // Avoid degenerate Normal triangle
 
     _inputs[FUZZY_IN_TDS].sets[0] = {MF_TRAPEZOIDAL, {0, 0, sp*0.5f, sp*0.7f}, "VeryLow"};
-    _inputs[FUZZY_IN_TDS].sets[1] = {MF_TRIANGULAR, {sp*0.5f, sp*0.75f, sp-db}, "Low"};
-    _inputs[FUZZY_IN_TDS].sets[2] = {MF_TRIANGULAR, {sp-db*2, sp, sp+db*2}, "Normal"};
-    _inputs[FUZZY_IN_TDS].sets[3] = {MF_TRIANGULAR, {sp+db, sp*1.25f, sp*1.5f}, "High"};
+    _inputs[FUZZY_IN_TDS].sets[1] = {MF_TRIANGULAR, {sp*0.5f, sp*0.75f, sp-db_eff}, "Low"};
+    _inputs[FUZZY_IN_TDS].sets[2] = {MF_TRIANGULAR, {sp-db_eff*2, sp, sp+db_eff*2}, "Normal"};
+    _inputs[FUZZY_IN_TDS].sets[3] = {MF_TRIANGULAR, {sp+db_eff, sp*1.25f, sp*1.5f}, "High"};
     _inputs[FUZZY_IN_TDS].sets[4] = {MF_TRAPEZOIDAL, {sp*1.3f, sp*1.5f, 5000, 5000}, "VeryHigh"};
 
     // ALKALINITY membership functions
     sp = _config->alk_setpoint;
     db = _config->alk_deadband;
+    db_eff = (db * 2.0f > 1.0f) ? db : 0.5f;
 
     _inputs[FUZZY_IN_ALKALINITY].sets[0] = {MF_TRAPEZOIDAL, {0, 0, sp*0.3f, sp*0.5f}, "VeryLow"};
-    _inputs[FUZZY_IN_ALKALINITY].sets[1] = {MF_TRIANGULAR, {sp*0.4f, sp*0.6f, sp-db}, "Low"};
-    _inputs[FUZZY_IN_ALKALINITY].sets[2] = {MF_TRIANGULAR, {sp-db*2, sp, sp+db*2}, "Normal"};
-    _inputs[FUZZY_IN_ALKALINITY].sets[3] = {MF_TRIANGULAR, {sp+db, sp*1.4f, sp*1.8f}, "High"};
+    _inputs[FUZZY_IN_ALKALINITY].sets[1] = {MF_TRIANGULAR, {sp*0.4f, sp*0.6f, sp-db_eff}, "Low"};
+    _inputs[FUZZY_IN_ALKALINITY].sets[2] = {MF_TRIANGULAR, {sp-db_eff*2, sp, sp+db_eff*2}, "Normal"};
+    _inputs[FUZZY_IN_ALKALINITY].sets[3] = {MF_TRIANGULAR, {sp+db_eff, sp*1.4f, sp*1.8f}, "High"};
     _inputs[FUZZY_IN_ALKALINITY].sets[4] = {MF_TRAPEZOIDAL, {sp*1.5f, sp*2.0f, 1000, 1000}, "VeryHigh"};
 
     // SULFITE membership functions
     sp = _config->sulfite_setpoint;
     db = _config->sulfite_deadband;
+    db_eff = (db * 2.0f > 0.5f) ? db : 0.25f;
 
     _inputs[FUZZY_IN_SULFITE].sets[0] = {MF_TRAPEZOIDAL, {0, 0, sp*0.2f, sp*0.4f}, "VeryLow"};
-    _inputs[FUZZY_IN_SULFITE].sets[1] = {MF_TRIANGULAR, {sp*0.3f, sp*0.5f, sp-db}, "Low"};
-    _inputs[FUZZY_IN_SULFITE].sets[2] = {MF_TRIANGULAR, {sp-db*2, sp, sp+db*2}, "Normal"};
-    _inputs[FUZZY_IN_SULFITE].sets[3] = {MF_TRIANGULAR, {sp+db, sp*1.5f, sp*2.0f}, "High"};
+    _inputs[FUZZY_IN_SULFITE].sets[1] = {MF_TRIANGULAR, {sp*0.3f, sp*0.5f, sp-db_eff}, "Low"};
+    _inputs[FUZZY_IN_SULFITE].sets[2] = {MF_TRIANGULAR, {sp-db_eff*2, sp, sp+db_eff*2}, "Normal"};
+    _inputs[FUZZY_IN_SULFITE].sets[3] = {MF_TRIANGULAR, {sp+db_eff, sp*1.5f, sp*2.0f}, "High"};
     _inputs[FUZZY_IN_SULFITE].sets[4] = {MF_TRAPEZOIDAL, {sp*1.8f, sp*2.5f, 100, 100}, "VeryHigh"};
 
     // PH membership functions
     sp = _config->ph_setpoint;
     db = _config->ph_deadband;
+    db_eff = (db * 2.0f > 0.05f) ? db : 0.025f;
 
     _inputs[FUZZY_IN_PH].sets[0] = {MF_TRAPEZOIDAL, {7.0f, 7.0f, 9.0f, 10.0f}, "Low"};
-    _inputs[FUZZY_IN_PH].sets[1] = {MF_TRIANGULAR, {9.5f, 10.5f, sp-db}, "SlightlyLow"};
-    _inputs[FUZZY_IN_PH].sets[2] = {MF_TRIANGULAR, {sp-db, sp, sp+db}, "Normal"};
-    _inputs[FUZZY_IN_PH].sets[3] = {MF_TRIANGULAR, {sp+db, 12.0f, 12.5f}, "SlightlyHigh"};
+    _inputs[FUZZY_IN_PH].sets[1] = {MF_TRIANGULAR, {9.5f, 10.5f, sp-db_eff}, "SlightlyLow"};
+    _inputs[FUZZY_IN_PH].sets[2] = {MF_TRIANGULAR, {sp-db_eff, sp, sp+db_eff}, "Normal"};
+    _inputs[FUZZY_IN_PH].sets[3] = {MF_TRIANGULAR, {sp+db_eff, 12.0f, 12.5f}, "SlightlyHigh"};
     _inputs[FUZZY_IN_PH].sets[4] = {MF_TRAPEZOIDAL, {12.0f, 12.5f, 14.0f, 14.0f}, "High"};
 
     // TEMPERATURE (simple 3-set)
