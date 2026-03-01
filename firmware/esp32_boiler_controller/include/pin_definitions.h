@@ -228,6 +228,15 @@
 #define SD_SPI_FREQ             4000000       // 4 MHz SPI clock for SD card
 
 // ============================================================================
+// RS-485 COPROCESSOR LINK (Main ESP32 — when using ESP32-C3 at boiler panel)
+// ============================================================================
+// When USE_COPROCESSOR_LINK is defined, Serial2 is used for RS-485 to C3.
+// EZO-EC and MAX31865 then reside on the C3; this UART is repurposed for the link.
+#define CP_LINK_UART_NUM        2             // Serial2
+#define CP_LINK_DE_RE_PIN      (-1)           // GPIO for DE/RE (set per board; -1 = not used)
+#define CP_LINK_BAUD            115200
+
+// ============================================================================
 // PIN VALIDATION
 // ============================================================================
 

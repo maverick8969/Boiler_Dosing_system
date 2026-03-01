@@ -53,6 +53,8 @@ the source files in `firmware/esp32_boiler_controller/`.
 | `include/data_logger.h` / `src/data_logger.cpp` | `DataLogger` — WiFi AP+STA, HTTP POST, buffered uploads, NTP sync |
 | `include/sd_logger.h` / `src/sd_logger.cpp` | `SDLogger` — SD card CSV logging, daily file rotation, SPI mutex |
 | `include/web_server.h` / `src/web_server.cpp` | `BoilerWebServer` — REST API + mobile web UI for manual test input |
+| `include/coprocessor_protocol.h` / `src/coprocessor_protocol.cpp` | RS-485 inter-MCU protocol: frame format, message types, CRC16, validation |
+| `include/coprocessor_link.h` / `src/coprocessor_link.cpp` | `CoprocessorLink` — main ESP32 side: send commands, receive telemetry/ACK, DE/RE half-duplex |
 
 ---
 

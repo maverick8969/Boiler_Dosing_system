@@ -22,6 +22,8 @@ of the Columbia CT-6 Boiler Dosing Controller.
 | `test_a4988_current_limit.cpp` | A4988 Vref/current limit setup, stall testing | - |
 | `test_blowdown_valve.cpp` | Blowdown valve relay control, 4-20mA feedback via ADS1115 | - |
 | `test_dual_temp_conductivity.cpp` | PT1000 RTD + DS18B20 + EZO-EC side-by-side comparison | Adafruit_MAX31865, OneWire, DallasTemperature |
+| `test_coprocessor_protocol.cpp` | RS-485 coprocessor protocol: CRC16, frame build/parse, validity | coprocessor_protocol |
+| `c3_coprocessor_stub.cpp` | ESP32-C3 stub: RS-485, frame parser, dummy telemetry, ACK commands (build with env `esp32c3_coprocessor`) | coprocessor_protocol |
 
 ## Building with PlatformIO
 
@@ -232,6 +234,9 @@ alongside the Atlas Scientific EZO-EC conductivity circuit:
 **Wiring:** MAX31865 software SPI on adjacent 30-pin DevKitC right-header pins
 (CS=GPIO19, SCK=GPIO18, MOSI=GPIO17, MISO=GPIO16).
 DS18B20 DATA -> GPIO4 with 4.7k pull-up to 3.3V. EZO-EC UART TX=GPIO25, RX=GPIO36.
+
+## Pin Definitions
+Relay NO -> 680 ohm (20mA open). Actuator feedback -> 150 ohm -> ADS1115 CH0.
 
 ## Pin Definitions
 
