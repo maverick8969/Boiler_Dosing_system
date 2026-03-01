@@ -12,29 +12,60 @@ the source files in `firmware/esp32_boiler_controller/`.
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                         ESP32 (Dual-Core)                           │
-│                                                                     │
-│  Core 1                              Core 0                         │
-│  ┌─────────────────────────┐         ┌─────────────────────────┐   │
-│  │ taskControlLoop (pri 4) │         │ taskDisplayLoop (pri 2) │   │
-│  │   100 ms period         │         │   200 ms period         │   │
-│  │   blowdown, pumps,      │         │   LCD + WS2812 LEDs     │   │
-│  │   fuzzy logic, alarms   │         └─────────────────────────┘   │
-│  ├─────────────────────────┤         ┌─────────────────────────┐   │
-│  │ taskMeasurementLoop     │         │ taskLoggingLoop (pri 1) │   │
-│  │   (pri 3)  500 ms       │         │   1000 ms period        │   │
-│  │   EZO-EC, MAX31865,     │         │   WiFi AP+STA dual mode │   │
-│  │   water meter update    │         │   TimescaleDB + Web UI  │   │
-│  │                         │         │   SD card logger        │   │
-│  └─────────────────────────┘         └─────────────────────────┘   │
-│                                                                     │
-│  Arduino loop()  ← processInputs() (encoder polling, 10 ms yield)  │
-│                                                                     │
-│  ISR layer (IRAM)                                                   │
-│  ├── Water meter pulse interrupt (GPIO34)                           │
-│  └── Rotary encoder A/B edge interrupts (GPIO15/GPIO2)              │
-└─────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│  Main ESP32 (Dual-Core)                    │  Optional: Xiao C3 (boiler panel)   │
+│                                            │                                      │
+│  Core 1                  Core 0            │  Telemetry (2–10 Hz) ────────────────┼──→ Main
+│  ┌──────────────────┐   ┌──────────────┐  │    conductivity, temp, blowdown     │
+│  │ taskControlLoop  │   │ taskDisplay  │  │    state, valve feedback, health    │
+│  │ taskMeasurement  │   │ taskLogging  │  │  Commands (on event) ←──────────────┼── Main
+│  └────────┬─────────┘   └──────────────┘  │    CMD_BLOWDOWN_OPEN/CLOSE, etc.    │
+│           │                               │  ACK/NAK ────────────────────────────┼──→ Main
+│           │ coprocessorLink.poll()        │                                      │
+│           │ (when coprocessor present)    │  RS-485 half-duplex (Serial2)       │
+│           └───────────────────────────────┼──────────────────────────────────────┘
+│  Arduino loop()  ← processInputs()        │
+│  ISR: Water meter (GPIO34), Encoder (15/2)│
+└──────────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Standalone:** No C3; conductivity from local EZO-EC + MAX31865, blowdown via GPIO4 and BlowdownController. **Coprocessor:** C3 sends telemetry; main sends commands; see [Coprocessor_Communication_Logic.md](Coprocessor_Communication_Logic.md) and Operating modes below.
+
+### Operating modes
+
+| Mode | Conductivity / temperature | Blowdown actuation | Valve feedback |
+|------|----------------------------|--------------------|----------------|
+| **Standalone** | `conductivitySensor` (EZO-EC + MAX31865 on main) | `BlowdownController` drives GPIO4 (relay) | ADS1115 on main I2C |
+| **Coprocessor** | `coprocessorLink.getLastTelemetry()` (conductivity_uS_cm, temperature_c) | Main sends `sendBlowdownOpen()` / `sendBlowdownClose()`; C3 drives relay | Telemetry: valve_open, valve_feedback_mA, blowdown_state |
+
+In coprocessor mode the **decision** state machine (when to open/close) runs on the main; **actuation** (relay, valve, feedback read) is on the C3. Main does not drive GPIO4. `main.cpp` does not yet branch on coprocessor mode; the intended behavior is as above and is implemented in `CoprocessorLink` and the protocol (see `include/coprocessor_link.h`, [Coprocessor_Communication_Logic.md](Coprocessor_Communication_Logic.md)).
+
+**Data flow (coprocessor mode):**
+
+```mermaid
+flowchart LR
+  subgraph main [Main ESP32]
+    Control[Control task]
+    Measurement[Measurement task]
+    Display[Display task]
+    Logging[Logging task]
+    Poll[coprocessorLink.poll]
+    TelemetryIn[getLastTelemetry]
+    CmdOut[sendBlowdownOpen/Close]
+  end
+  subgraph c3 [Xiao C3]
+    TelemetryOut[Telemetry 2-10 Hz]
+    CmdIn[Commands]
+    AckOut[ACK/NAK]
+  end
+  Poll --> TelemetryIn
+  TelemetryOut -->|RS-485| Poll
+  CmdOut -->|RS-485| CmdIn
+  CmdIn --> AckOut
+  AckOut -->|RS-485| Poll
+  TelemetryIn --> Control
+  Control --> CmdOut
+  TelemetryIn -.->|comms lost| SafeMode[Safe mode: no blowdown open]
 ```
 
 ### Source Files
@@ -75,6 +106,9 @@ Wire.begin(SDA=21, SCL=22, 400 kHz)    ← shared I2C: LCD + ADS1115
 loadConfiguration()                      ← NVS "boiler_cfg" → system_config_t
   ├── Config blob present + magic OK?  → use stored config
   └── Missing / corrupt?              → initializeDefaults() → saveConfiguration()
+       │
+       ▼
+[If coprocessor link enabled] coprocessorLink.begin(baud)  ← Serial2 + DE/RE for RS-485; skip local EZO/MAX31865 init if sensors on C3 (or keep for fallback)
        │
        ▼
 display.begin()                          ← LCD init + custom chars + LED strip
@@ -129,15 +163,21 @@ Runs on whichever core is free (default Core 1). Calls `processInputs()` then yi
 
 ## Control Task Detail (`taskControlLoop` — `main.cpp:233`)
 
-Each 100 ms tick executes the following pipeline:
+Each 100 ms tick executes the following pipeline.
+
+**If coprocessor present:** At start of tick, `coprocessorLink.poll()`. If `getLastTelemetry().valid`, use `conductivity_uS_cm` and `temperature_c` for fuzzy input and blowdown **decisions**; drive blowdown by sending `sendBlowdownOpen()` / `sendBlowdownClose()` (actuation is on C3). Valve position from telemetry: `valve_open`, `valve_feedback_mA`, `blowdown_state`. If **comms lost** (no telemetry within timeout): do not open blowdown; use last valid telemetry or safe defaults for display/logging; set or propagate a comms-lost alarm.
+
+**If standalone:** Use conductivity from last Measurement reading; blowdown from `blowdownController.update()` and GPIO4.
 
 ```
 ┌─ updateFeedwaterPumpMonitor() ───────────────────────────────────┐
 │   └── GPIO35 edge detect → cycle count, on-time, event logging  │
 │                                                                   │
-├─ Get conductivity from last Measurement reading ─────────────────┤
+├─ [Coprocessor] coprocessorLink.poll(); if valid telemetry use    │
+│   conductivity_uS_cm, temperature_c; send open/close commands.  │
+│   [Standalone] Get conductivity from last Measurement reading     │
 │                                                                   │
-├─ blowdownController.update(conductivity) ────────────────────────┤
+├─ [Standalone] blowdownController.update(conductivity)             │
 │   └── state machine: IDLE → VALVE_OPENING → BLOWING_DOWN →       │
 │       VALVE_CLOSING → IDLE  (see Blowdown State Machine below)   │
 │                                                                   │
@@ -165,6 +205,8 @@ Each 100 ms tick executes the following pipeline:
 ---
 
 ## Blowdown State Machine (`blowdown.h` / `blowdown.cpp`)
+
+**Coprocessor mode:** The **decision** state machine (when to open/close) stays on the main; **actuation** (relay, valve, feedback) is on the C3. Main sends open/close commands and uses telemetry for `valve_open`, `valve_feedback_mA`, and `blowdown_state` instead of local ADS1115 and GPIO4. See “Blowdown sequence (request → confirmation → final reading)” in [Coprocessor_Communication_Logic.md](Coprocessor_Communication_Logic.md): Main → CMD_BLOWDOWN_OPEN → C3 ACK → telemetry with valve open → … → CMD_BLOWDOWN_CLOSE → ACK → next telemetry as “final” reading.
 
 ### States
 
@@ -348,8 +390,12 @@ fuzzy_result_t
 
 Every 500 ms:
 
+**Coprocessor mode:** Prefer conductivity and temperature from `coprocessorLink.getLastTelemetry()` (ensure `coprocessorLink.poll()` is called frequently, e.g. from this task or the Control task). Optionally still run `conductivitySensor.read()` as fallback when telemetry is invalid. Update `systemState` from telemetry when valid.
+
+**Standalone:** Run local sensor read and water meter update as below.
+
 ```
-conductivitySensor.read()
+conductivitySensor.read()   [Standalone; or fallback when telemetry invalid]
   ├── readTemperature()           ← MAX31865 SW-SPI: CS=16, MOSI=23, MISO=39, SCK=18
   │     └── _rtd.readRTD() → resistance → Callendar–Van Dusen → °C
   ├── Send RT,<temp> to EZO       ← UART2 TX=25, RX=36
@@ -559,12 +605,12 @@ the AP still runs, allowing local web access and SD card logging.
 
 | Field | Source |
 |-------|--------|
-| `conductivity` | `systemState.conductivity_calibrated` |
-| `temperature` | `systemState.temperature_celsius` |
+| `conductivity` | `systemState.conductivity_calibrated` (from telemetry when coprocessor present and valid) |
+| `temperature` | `systemState.temperature_celsius` (from telemetry when coprocessor present and valid) |
 | `water_meter1/2` | `waterMeterManager.getMeter(n)->getTotalVolume()` |
 | `flow_rate` | `waterMeterManager.getCombinedFlowRate()` |
-| `blowdown_active` | `blowdownController.isActive()` |
-| `valve_position_mA` | `blowdownController.getFeedbackmA()` |
+| `blowdown_active` | `blowdownController.isActive()` (from telemetry when coprocessor present) |
+| `valve_position_mA` | `blowdownController.getFeedbackmA()` (from telemetry when coprocessor present) |
 | `pump1/2/3_active` | `pumpManager.getPump(n)->isRunning()` |
 | `feedwater_pump_on` | `systemState.feedwater_pump_on` |
 | `fw_pump_cycle_count` | `systemState.fw_pump_cycle_count` |
@@ -718,3 +764,6 @@ Control Task    FuzzyController    PumpManager       ChemicalPump[i]    AccelSte
 | **WiFi STA** | Disconnect detected | STA auto-reconnects; AP + web UI stay active; readings buffered (100 slots) + SD card |
 | **NVS** | Config load fails validation | Factory defaults loaded; `saveConfiguration()` called |
 | **HOA HAND** | 10-minute timeout | Auto-reverts to `HOA_AUTO` |
+| **Coprocessor link** | No telemetry from C3 for timeout (e.g. 5 s) | Safe mode: do not open blowdown; set comms-lost alarm; log event; use last valid or safe defaults |
+| **C3 (telemetry)** | `valve_fault` true in telemetry | Map to `ALARM_VALVE_FAULT` (or equivalent) |
+| **C3 (telemetry)** | `sensor_ok` or `temp_ok` false in telemetry | Map to existing sensor/temp alarms (`ALARM_SENSOR_ERROR`, `ALARM_TEMP_ERROR`) |

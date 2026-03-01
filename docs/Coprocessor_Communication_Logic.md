@@ -1,6 +1,6 @@
 # Coprocessor Communication Logic
 
-This document defines **what data is transmitted and when** on the RS-485 link between the main ESP32 (control box) and the ESP32-C3 (boiler panel), including sequences for sensor data, confirmations, blowdown requests, and final readings.
+This document defines **what data is transmitted and when** on the RS-485 link between the main ESP32 (control box) and the boiler-panel coprocessor (ESP32 DevKit), including sequences for sensor data, confirmations, blowdown requests, and final readings.
 
 ---
 
@@ -18,7 +18,7 @@ This document defines **what data is transmitted and when** on the RS-485 link b
 
 - **When**: C3 sends **telemetry** at a fixed rate (e.g. **2–10 Hz**, configurable).
 - **Content**: Conductivity (uS/cm), temperature (°C), blowdown state, valve open/closed, valve feedback (mA), solenoid on/off, sensor/valve health flags, sequence number.
-- **Purpose**: Main uses this as the only source of conductivity and temperature when the coprocessor is present; it runs fuzzy logic, blowdown decisions, and alarms from this data.
+- **Purpose**: Main uses this as the only source of conductivity and temperature when the coprocessor is present; it runs fuzzy logic, blowdown decisions, and alarms from this data. The **Atlas EZO-EC** is on the boiler panel; the coprocessor reads it over Serial1 (GPIO9 RX, GPIO10 TX, 9600 baud) and includes the reading in telemetry.
 - **No explicit “confirmation”** from main for telemetry: main does not ACK each telemetry frame. Sequence numbers allow main to detect gaps or duplicates.
 
 ### 2.2 Main → C3: Commands (on event)

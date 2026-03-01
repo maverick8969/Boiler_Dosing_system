@@ -23,7 +23,27 @@ of the Columbia CT-6 Boiler Dosing Controller.
 | `test_blowdown_valve.cpp` | Blowdown valve relay control, 4-20mA feedback via ADS1115 | - |
 | `test_dual_temp_conductivity.cpp` | PT1000 RTD + DS18B20 + EZO-EC side-by-side comparison | Adafruit_MAX31865, OneWire, DallasTemperature |
 | `test_coprocessor_protocol.cpp` | RS-485 coprocessor protocol: CRC16, frame build/parse, validity | coprocessor_protocol |
-| `c3_coprocessor_stub.cpp` | ESP32-C3 stub: RS-485, frame parser, dummy telemetry, ACK commands (build with env `esp32c3_coprocessor`) | coprocessor_protocol |
+| `c3_coprocessor_stub.cpp` | ESP32 DevKit coprocessor stub: RS-485 (auto-direction), EZO on Serial1, internal ADC valve, telemetry (build with env `esp32dev_coprocessor`) | coprocessor_protocol |
+| `test_c3_io.cpp` | **ESP32 DevKit**: Blowdown + solenoid relays (GPIO4/15), valve 4–20 mA + 2× CT RMS via internal ADC (GPIO36/39/34). Build: `test_c3_io` | c3_pin_definitions |
+
+## ESP32 DevKit pin map (boiler panel coprocessor)
+
+Tests and firmware for the **ESP32 DevKit** (boiler panel) use `include/c3_pin_definitions.h`:
+
+| Function | GPIO | Notes |
+|----------|------|-------|
+| RS-485 TX | 17 | Serial2 (auto-direction module, no DE pin) |
+| RS-485 RX | 16 | Serial2 |
+| RS-485 DE/RE | — | Not used (auto-direction) |
+| Blowdown relay | 4 | Relay module IN (high = on) |
+| Solenoid relay | 15 | Relay module IN |
+| Valve 4–20 mA | 36 | Internal ADC (150 Ω sense) |
+| CT boiler power | 39 | Internal ADC (DC bias + software RMS) |
+| CT low water | 34 | Internal ADC (DC bias + software RMS) |
+| EZO-EC | 9 (RX), 10 (TX) | Serial1, 9600 baud |
+| MAX31865 | 5 (CS), 18/23/19 (SCK/MOSI/MISO) | VSPI |
+
+**Internal ADC:** Valve on GPIO36; CTs on GPIO39/34 with **DC bias circuit** (two 10 kΩ + 10 µF cap per channel) and firmware **software RMS** (see schematic Section 13a).
 
 ## Building with PlatformIO
 
