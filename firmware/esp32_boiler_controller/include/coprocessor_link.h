@@ -1,6 +1,6 @@
 /**
  * @file coprocessor_link.h
- * @brief Main ESP32 side: RS-485 link to ESP32-C3 coprocessor
+ * @brief Main ESP32 side: RS-485 link to panel coprocessor (ESP32 DevKit at boiler)
  *
  * Sends commands (blowdown open/close, solenoid, etc.), receives telemetry,
  * ACK/NAK, events, and errors. DE/RE for half-duplex; turn-around delay after TX.
@@ -10,6 +10,7 @@
 #define COPROCESSOR_LINK_H
 
 #include <Arduino.h>
+#include <freertos/semphr.h>
 #include "config.h"
 #include "coprocessor_protocol.h"
 
@@ -21,7 +22,7 @@
 #define CP_LINK_BAUD_DEFAULT          115200
 
 // ============================================================================
-// LAST TELEMETRY (mirrors C3 telemetry for main control loop)
+// LAST TELEMETRY (mirrors panel telemetry for main control loop)
 // ============================================================================
 
 typedef struct {
@@ -34,7 +35,7 @@ typedef struct {
     bool sensor_ok;
     bool temp_ok;
     bool valve_fault;
-    bool comms_lost;           // C3 reports loss of main heartbeat
+    bool comms_lost;           // Panel reports loss of main heartbeat
     uint16_t sequence;
     uint32_t timestamp_ms;
     bool valid;                 // At least one telemetry received
@@ -74,24 +75,26 @@ public:
     bool begin(uint32_t baud = CP_LINK_BAUD_DEFAULT);
 
     /**
-     * @brief Call from main loop or a task: receive bytes, parse frames, update last telemetry
+     * @brief Call from main loop or a task: receive bytes, parse frames, update last telemetry.
+     * Thread-safe: use from one task only or with mutex (internal mutex protects RX/telemetry).
      */
     void poll();
 
     /**
-     * @brief Get last received telemetry (valid only if .valid is true)
+     * @brief Get last received telemetry (valid only if .valid is true).
+     * Thread-safe: returns a snapshot copy.
      */
-    const cp_link_telemetry_t& getLastTelemetry() const { return _telemetry; }
+    const cp_link_telemetry_t& getLastTelemetry() const;
 
     /**
      * @brief True if no telemetry received within CP_LINK_TELEMETRY_TIMEOUT_MS
      */
-    bool isCommsLost() const { return _comms_lost; }
+    bool isCommsLost() const;
 
     /**
      * @brief millis() when comms were first considered lost (0 if not lost)
      */
-    uint32_t getCommsLostSinceMs() const { return _comms_lost_since_ms; }
+    uint32_t getCommsLostSinceMs() const;
 
     /**
      * @brief Send blowdown open command; blocks until ACK/NAK or timeout
@@ -122,18 +125,19 @@ public:
     /**
      * @brief Last result from a sent command (ACK/NAK/timeout)
      */
-    cp_cmd_result_t getLastCommandResult() const { return _last_cmd_result; }
+    cp_cmd_result_t getLastCommandResult() const;
 
     /**
      * @brief Last NAK result code if getLastCommandResult() == CP_CMD_RESULT_NAK
      */
-    uint8_t getLastNakResult() const { return _last_nak_result; }
+    uint8_t getLastNakResult() const;
 
 private:
     HardwareSerial& _serial;
     int8_t _de_re_pin;
     uint32_t _baud;
     cp_link_telemetry_t _telemetry;
+    mutable cp_link_telemetry_t _telemetry_copy;  // Snapshot for getLastTelemetry()
     bool _comms_lost;
     uint32_t _comms_lost_since_ms;
     uint16_t _cmd_sequence;
@@ -142,6 +146,8 @@ private:
 
     uint8_t _rx_buf[CP_MAX_FRAME];
     size_t _rx_len;
+
+    SemaphoreHandle_t _mutex;  // Protects _rx_buf, _rx_len, _telemetry, _comms_lost, _last_*
 
     void _setDeRe(bool drive);
     void _sendFrame(uint8_t type, const uint8_t* payload, uint8_t plen);

@@ -64,7 +64,8 @@
 // ============================================================================
 // 1 pulse per gallon contact closure input
 
-#define WATER_METER_PIN         GPIO_NUM_34   // Input only GPIO, interrupt capable
+#define WATER_METER_PIN         GPIO_NUM_34   // Input only GPIO, interrupt capable (WM1)
+#define WATER_METER_2_PIN       GPIO_NUM_17   // WM2; note: shares with AUX_INPUT1 — use one or the other. Do NOT use GPIO19 (SD_CS).
 #define WATER_METER_DEBOUNCE_MS 50            // Debounce time in milliseconds
 #define WATER_METER_PULSES_PER_GAL  1         // Pulses per gallon (configurable)
 
@@ -228,10 +229,10 @@
 #define SD_SPI_FREQ             4000000       // 4 MHz SPI clock for SD card
 
 // ============================================================================
-// RS-485 COPROCESSOR LINK (Main ESP32 — when using ESP32-C3 at boiler panel)
+// RS-485 COPROCESSOR LINK (Main ESP32 — when using panel ESP32 DevKit at boiler)
 // ============================================================================
-// When USE_COPROCESSOR_LINK is defined, Serial2 is used for RS-485 to C3.
-// EZO-EC and MAX31865 then reside on the C3; this UART is repurposed for the link.
+// When USE_COPROCESSOR_LINK is defined, Serial2 is used for RS-485 to the panel.
+// EZO-EC and MAX31865 then reside on the panel; this UART is repurposed for the link.
 #define CP_LINK_UART_NUM        2             // Serial2
 #define CP_LINK_DE_RE_PIN      (-1)           // GPIO for DE/RE (set per board; -1 = not used)
 #define CP_LINK_BAUD            115200
@@ -266,7 +267,7 @@
 | 14   | STEPPER1_DIR          | Output    | H2SO3 pump direction                |
 | 15   | ENCODER_PIN_A (CLK)   | Input     | Encoder output A (strapping)        |
 | 16   | MAX31865_CS           | Output    | RTD SPI chip select                 |
-| 17   | AUX_INPUT1            | Input     | Drum level switch                   |
+| 17   | AUX_INPUT1 / WM2      | Input     | Drum level switch or Water Meter 2 (use one) |
 | 18   | VSPI_SCK              | Output    | Shared SPI clock (MAX31865 + SD)    |
 | 19   | SD_CS                 | Output    | SD card chip select (VSPI)          |
 | 21   | I2C_SDA               | I/O       | LCD + ADS1115                       |

@@ -31,7 +31,8 @@ typedef enum {
     SAFE_MODE_STALE_DATA,       // Measurement task stalled
     SAFE_MODE_BUS_FAIL,         // I2C or SPI bus hung
     SAFE_MODE_WATCHDOG_RESTART, // Post-watchdog recovery
-    SAFE_MODE_CRITICAL_FAULT    // Multiple required devices failed
+    SAFE_MODE_CRITICAL_FAULT,   // Multiple required devices failed
+    SAFE_MODE_COMMS_LOST        // Coprocessor link down (2-board mode)
 } safe_mode_t;
 
 // ============================================================================
@@ -143,6 +144,13 @@ public:
     /** Get safe mode reason as string */
     const char* getSafeModeString();
 
+    /**
+     * Report coprocessor link comms state (when USE_COPROCESSOR_LINK).
+     * When lost is true, enters SAFE_MODE_COMMS_LOST. When lost is false,
+     * stores state for auto-exit after hold time.
+     */
+    void reportCommsLost(bool lost);
+
     // --- I2C Bus Recovery ---
 
     /**
@@ -165,6 +173,7 @@ private:
     safe_mode_t _safe_mode;
     uint32_t    _safe_mode_enter_time;
     uint32_t    _last_i2c_recovery_time;
+    bool        _comms_lost;              // Coprocessor link down (for SAFE_MODE_COMMS_LOST exit)
 
     // Internal helpers
     void checkStaleness();

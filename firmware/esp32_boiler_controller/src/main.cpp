@@ -38,16 +38,30 @@
 #include "sensor_health.h"
 #include <esp_task_wdt.h>
 
+#ifdef USE_COPROCESSOR_LINK
+#include "coprocessor_link.h"
+#endif
+
 // ============================================================================
 // GLOBAL INSTANCES
 // ============================================================================
 
 // Conductivity sensor (Atlas Scientific EZO-EC via UART + Adafruit MAX31865 PT1000 RTD via hardware VSPI)
+// When USE_COPROCESSOR_LINK: Serial2 is used for RS-485 link; EZO/MAX31865 are on the panel.
+#ifndef USE_COPROCESSOR_LINK
 ConductivitySensor conductivitySensor(
     Serial2,
     EZO_EC_RX_PIN, EZO_EC_TX_PIN,
     MAX31865_CS_PIN  // Hardware SPI — shares VSPI bus with SD card
 );
+#endif
+
+#ifdef USE_COPROCESSOR_LINK
+CoprocessorLink coprocessorLink(Serial2, CP_LINK_DE_RE_PIN);
+static bool s_last_blowdown_energized = false;  // For command-on-change only
+static bool s_coprocessor_ready = false;         // First valid telemetry or timeout
+static const uint32_t COPROC_WAIT_TIMEOUT_MS = 10000;  // Enter normal after first telemetry or 10 s
+#endif
 
 // System configuration (stored in NVS)
 system_config_t systemConfig;
@@ -141,12 +155,22 @@ void setup() {
     }
     display.showMessage("Initializing...", "Please wait");
 
+#ifdef USE_COPROCESSOR_LINK
+    // RS-485 link to panel (conductivity/temp on panel)
+    if (!coprocessorLink.begin(CP_LINK_BAUD)) {
+        Serial.println("ERROR: Coprocessor link initialization failed!");
+        display.showAlarm("LINK ERROR");
+    } else {
+        Serial.println("Coprocessor link initialized (2-DevKit mode)");
+    }
+#else
     // Conductivity sensor (hardware SPI via shared VSPI)
     if (!conductivitySensor.begin()) {
         Serial.println("ERROR: Conductivity sensor initialization failed!");
         display.showAlarm("SENSOR ERROR");
     }
     conductivitySensor.configure(&systemConfig.conductivity);
+#endif
 
     // Pump manager
     if (!pumpManager.begin()) {
@@ -161,12 +185,15 @@ void setup() {
     waterMeterManager.configure(systemConfig.meters);
     waterMeterManager.loadAllFromNVS();
 
-    // Blowdown controller
+    // Blowdown controller (local relay; when USE_COPROCESSOR_LINK panel also has valve, we send commands)
     if (!blowdownController.begin()) {
         Serial.println("ERROR: Blowdown controller initialization failed!");
     }
     blowdownController.configure(&systemConfig.blowdown);
     blowdownController.setConductivityConfig(&systemConfig.conductivity);
+#ifdef USE_COPROCESSOR_LINK
+    s_last_blowdown_energized = false;
+#endif
 
     // Data logger
     if (!dataLogger.begin(&systemConfig)) {
@@ -315,10 +342,44 @@ void taskControlLoop(void* parameter) {
         // --- Sensor health check ---
         sensorHealth.update();
 
-        // --- Safe mode enforcement ---
-        if (sensorHealth.isInSafeMode()) {
+#ifdef USE_COPROCESSOR_LINK
+        // Poll RS-485 for telemetry; update health and comms-lost state
+        coprocessorLink.poll();
+        if (coprocessorLink.isCommsLost()) {
+            sensorHealth.reportCommsLost(true);
+        } else {
+            const cp_link_telemetry_t& t = coprocessorLink.getLastTelemetry();
+            if (t.valid) {
+                if (!s_coprocessor_ready) s_coprocessor_ready = true;  // Boot handshake: first valid telemetry
+                sensorHealth.reportCommsLost(false);
+                sensorHealth.reportMeasurementCycle();
+                sensorHealth.reportConductivityOK(t.conductivity_uS_cm);
+                sensorHealth.reportTemperatureOK(t.temperature_c);
+            } else {
+                sensorHealth.reportCommsLost(true);
+            }
+        }
+        // Wait for first valid telemetry (or timeout) before running normal control
+        if (!s_coprocessor_ready && (millis() >= COPROC_WAIT_TIMEOUT_MS)) {
+            s_coprocessor_ready = true;  // Timeout: proceed anyway, safe mode will apply if still no telemetry
+        }
+#endif
+
+        // --- Safe mode enforcement (also when waiting for coprocessor) ---
+        if (sensorHealth.isInSafeMode()
+#ifdef USE_COPROCESSOR_LINK
+            || !s_coprocessor_ready
+#endif
+        ) {
             blowdownController.closeValve();
             pumpManager.stopAll();
+#ifdef USE_COPROCESSOR_LINK
+            // Tell panel to close valve when we are in safe mode
+            if (!coprocessorLink.isCommsLost()) {
+                coprocessorLink.sendBlowdownClose();
+            }
+            s_last_blowdown_energized = false;
+#endif
 
             // Still monitor feedwater pump and check alarms
             updateFeedwaterPumpMonitor();
@@ -331,11 +392,45 @@ void taskControlLoop(void* parameter) {
         // --- Feedwater pump monitoring (GPIO35 via optocoupler) ---
         updateFeedwaterPumpMonitor();
 
-        // Get current conductivity
-        float conductivity = conductivitySensor.getLastReading().calibrated;
+        // Get current conductivity and temperature (local sensors or telemetry)
+        float conductivity;
+        float temperature_c;
+#ifdef USE_COPROCESSOR_LINK
+        {
+            const cp_link_telemetry_t& t = coprocessorLink.getLastTelemetry();
+            if (t.valid) {
+                conductivity = t.conductivity_uS_cm;
+                temperature_c = t.temperature_c;
+                systemState.conductivity_calibrated = t.conductivity_uS_cm;
+                systemState.temperature_celsius = t.temperature_c;
+                systemState.conductivity_raw = t.conductivity_uS_cm;
+                systemState.conductivity_compensated = t.conductivity_uS_cm;
+            } else {
+                conductivity = 0.0f;
+                temperature_c = 0.0f;
+            }
+        }
+#else
+        conductivity = conductivitySensor.getLastReading().calibrated;
+        temperature_c = conductivitySensor.getLastReading().temperature_c;
+#endif
 
         // Update blowdown control (flow_ok always true — no flow switch installed)
         blowdownController.update(conductivity);
+
+#ifdef USE_COPROCESSOR_LINK
+        // Send blowdown open/close to panel on transition only
+        bool energized = blowdownController.getStatus().relay_energized;
+        if (energized != s_last_blowdown_energized) {
+            s_last_blowdown_energized = energized;
+            if (!coprocessorLink.isCommsLost()) {
+                if (energized)
+                    coprocessorLink.sendBlowdownOpen();
+                else
+                    coprocessorLink.sendBlowdownClose();
+            }
+        }
+#endif
 
         // Get water meter data for feed modes
         uint32_t water_contacts = waterMeterManager.getContactsSinceLast(2);  // Both meters
@@ -344,7 +439,7 @@ void taskControlLoop(void* parameter) {
         // Build fuzzy inputs from current readings and manual test values
         fuzzy_inputs_t fuzzy_inputs;
         fuzzy_inputs.conductivity = conductivity;
-        fuzzy_inputs.temperature = conductivitySensor.getLastReading().temperature_c;
+        fuzzy_inputs.temperature = temperature_c;
         fuzzy_inputs.cond_trend = 0.0f;  // TODO: Calculate from history
         // Manual inputs are set via web UI or LCD menu through fuzzyController.setManualInput()
         fuzzy_inputs.alkalinity = 0.0f;
@@ -387,9 +482,13 @@ void taskControlLoop(void* parameter) {
 }
 
 void taskMeasurementLoop(void* parameter) {
+    esp_task_wdt_add(NULL);  // Subscribe this task to watchdog
     TickType_t lastWakeTime = xTaskGetTickCount();
 
     while (true) {
+        esp_task_wdt_reset();  // Feed the watchdog
+
+#ifndef USE_COPROCESSOR_LINK
         // Read conductivity sensor (acquires shared SPI bus for MAX31865)
         if (xSemaphoreTake(spiMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
             conductivity_reading_t reading = conductivitySensor.read();
@@ -419,6 +518,8 @@ void taskMeasurementLoop(void* parameter) {
         }
         // If mutex not acquired, measurement is stale — sensorHealth.update()
         // in the control task will detect this via getMeasurementAge().
+#endif
+        // When USE_COPROCESSOR_LINK, conductivity/temp come from telemetry in control task.
 
         // Update water meters
         waterMeterManager.update();
@@ -429,9 +530,12 @@ void taskMeasurementLoop(void* parameter) {
 }
 
 void taskDisplayLoop(void* parameter) {
+    esp_task_wdt_add(NULL);  // Subscribe this task to watchdog
     TickType_t lastWakeTime = xTaskGetTickCount();
 
     while (true) {
+        esp_task_wdt_reset();  // Feed the watchdog
+
         // Update display
         display.update();
 
@@ -441,10 +545,13 @@ void taskDisplayLoop(void* parameter) {
 }
 
 void taskLoggingLoop(void* parameter) {
+    esp_task_wdt_add(NULL);  // Subscribe this task to watchdog
     TickType_t lastWakeTime = xTaskGetTickCount();
     uint32_t lastLogTime = 0;
 
     while (true) {
+        esp_task_wdt_reset();  // Feed the watchdog
+
         // Update data logger (handle WiFi reconnection, etc.)
         dataLogger.update();
 
@@ -645,13 +752,25 @@ void checkAlarms() {
         new_alarms |= ALARM_BLOWDOWN_TIMEOUT;
     }
 
-    // Sensor errors (from health monitor, not raw sensor flag)
+    // Sensor errors (from health monitor, or telemetry flags in coprocessor mode)
+#ifdef USE_COPROCESSOR_LINK
+    {
+        const cp_link_telemetry_t& t = coprocessorLink.getLastTelemetry();
+        if (!t.valid || !t.sensor_ok || !sensor_valid) {
+            new_alarms |= ALARM_SENSOR_ERROR;
+        }
+        if (!t.valid || !t.temp_ok) {
+            new_alarms |= ALARM_TEMP_ERROR;
+        }
+    }
+#else
     if (!conductivitySensor.isSensorOK() || !sensor_valid) {
         new_alarms |= ALARM_SENSOR_ERROR;
     }
     if (!conductivitySensor.isTempSensorOK()) {
         new_alarms |= ALARM_TEMP_ERROR;
     }
+#endif
 
     // Stale data alarm
     if (!sensorHealth.isMeasurementFresh()) {
@@ -669,9 +788,15 @@ void checkAlarms() {
     }
 
     // Blowdown valve fault (4-20mA feedback out of range)
+#ifdef USE_COPROCESSOR_LINK
+    if (coprocessorLink.getLastTelemetry().valid && coprocessorLink.getLastTelemetry().valve_fault) {
+        new_alarms |= ALARM_VALVE_FAULT;
+    }
+#else
     if (blowdownController.isValveFault()) {
         new_alarms |= ALARM_VALVE_FAULT;
     }
+#endif
 
     // --- Rising edge (new alarms) ---
     uint16_t rising_alarms = new_alarms & ~systemState.active_alarms;

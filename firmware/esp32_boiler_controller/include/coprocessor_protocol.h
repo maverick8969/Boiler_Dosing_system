@@ -1,9 +1,9 @@
 /**
  * @file coprocessor_protocol.h
- * @brief RS-485 inter-MCU protocol between main ESP32 and ESP32-C3 coprocessor
+ * @brief RS-485 inter-MCU protocol between main ESP32 and panel coprocessor (ESP32 DevKit)
  *
  * Shared definitions for frame format, message types, and payloads.
- * Used by both main (control box) and C3 (boiler panel) firmware.
+ * Used by both main (control box) and panel (boiler panel) firmware.
  *
  * Physical: half-duplex RS-485; UART 115200–921600 8N1; DE/RE per node.
  * Frame: SYNC(2) TYPE(1) LEN(1) PAYLOAD(LEN) CRC16(2). LEN excludes header and CRC.
@@ -33,22 +33,22 @@
 // ============================================================================
 
 typedef enum {
-    CP_TYPE_TELEMETRY = 0x01,    // C3 -> Main: sensor + actuator state
-    CP_TYPE_CMD_MASK  = 0x10,    // Commands from Main -> C3
+    CP_TYPE_TELEMETRY = 0x01,    // Panel -> Main: sensor + actuator state
+    CP_TYPE_CMD_MASK  = 0x10,    // Commands from Main -> Panel
     CP_TYPE_CMD_BLOWDOWN_OPEN  = 0x11,
     CP_TYPE_CMD_BLOWDOWN_CLOSE = 0x12,
     CP_TYPE_CMD_SOLENOID       = 0x13,  // on/off
     CP_TYPE_CMD_SAMPLE_REQUEST = 0x14,
     CP_TYPE_CMD_CONFIG        = 0x15,   // config blob (optional)
-    CP_TYPE_ACK               = 0x20,   // C3 -> Main: command accepted
-    CP_TYPE_NAK               = 0x21,   // C3 -> Main: command rejected
-    CP_TYPE_EVENT             = 0x30,   // C3 -> Main: alarm, valve timeout, limit fault
-    CP_TYPE_ERROR             = 0x31,   // C3 -> Main: CRC/seq error, internal fault
-    CP_TYPE_TIME_SYNC         = 0x40,   // Main -> C3: Unix timestamp
+    CP_TYPE_ACK               = 0x20,   // Panel -> Main: command accepted
+    CP_TYPE_NAK               = 0x21,   // Panel -> Main: command rejected
+    CP_TYPE_EVENT             = 0x30,   // Panel -> Main: alarm, valve timeout, limit fault
+    CP_TYPE_ERROR             = 0x31,   // Panel -> Main: CRC/seq error, internal fault
+    CP_TYPE_TIME_SYNC         = 0x40,   // Main -> Panel: Unix timestamp
 } cp_msg_type_t;
 
 // ============================================================================
-// TELEMETRY PAYLOAD (C3 -> Main, 2–10 Hz)
+// TELEMETRY PAYLOAD (Panel -> Main, 2–10 Hz)
 // ============================================================================
 
 typedef struct __attribute__((packed)) {
@@ -61,15 +61,15 @@ typedef struct __attribute__((packed)) {
     uint8_t sensor_ok;          // Conductivity sensor valid
     uint8_t temp_ok;           // RTD valid
     uint8_t valve_fault;       // 4–20 mA fault
-    uint8_t comms_lost;        // C3 has lost main heartbeat
+    uint8_t comms_lost;        // Panel has lost main heartbeat
     uint16_t sequence;         // Incrementing telemetry sequence
-    uint32_t timestamp_ms;      // C3 millis() (optional for drift check)
+    uint32_t timestamp_ms;      // Panel millis() (optional for drift check)
 } cp_telemetry_payload_t;
 
 #define CP_TELEMETRY_PAYLOAD_SIZE  (sizeof(cp_telemetry_payload_t))
 
 // ============================================================================
-// COMMAND PAYLOADS (Main -> C3)
+// COMMAND PAYLOADS (Main -> Panel)
 // ============================================================================
 
 typedef struct __attribute__((packed)) {
@@ -90,7 +90,7 @@ typedef struct __attribute__((packed)) {
 } cp_cmd_sample_request_t;
 
 // ============================================================================
-// ACK / NAK PAYLOAD (C3 -> Main)
+// ACK / NAK PAYLOAD (Panel -> Main)
 // ============================================================================
 
 typedef struct __attribute__((packed)) {
@@ -107,20 +107,20 @@ typedef struct __attribute__((packed)) {
 #define CP_NAK_OTHER           0xFF
 
 // ============================================================================
-// EVENT PAYLOAD (C3 -> Main, on change)
+// EVENT PAYLOAD (Panel -> Main, on change)
 // ============================================================================
 
 typedef struct __attribute__((packed)) {
     uint16_t event_code;       // Alarm bitmask or event id
     uint8_t  severity;         // 0=info, 1=warning, 2=alarm
     uint8_t  reserved;
-    uint32_t timestamp_ms;     // C3 millis
+    uint32_t timestamp_ms;     // Panel millis
 } cp_event_payload_t;
 
 #define CP_EVENT_PAYLOAD_SIZE  (sizeof(cp_event_payload_t))
 
 // ============================================================================
-// ERROR PAYLOAD (C3 -> Main)
+// ERROR PAYLOAD (Panel -> Main)
 // ============================================================================
 
 typedef struct __attribute__((packed)) {
@@ -132,7 +132,7 @@ typedef struct __attribute__((packed)) {
 #define CP_ERROR_PAYLOAD_SIZE  (sizeof(cp_error_payload_t))
 
 // ============================================================================
-// TIME SYNC PAYLOAD (Main -> C3)
+// TIME SYNC PAYLOAD (Main -> Panel)
 // ============================================================================
 
 typedef struct __attribute__((packed)) {

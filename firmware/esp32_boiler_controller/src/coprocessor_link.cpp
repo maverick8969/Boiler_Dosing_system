@@ -1,6 +1,6 @@
 /**
  * @file coprocessor_link.cpp
- * @brief Main ESP32 RS-485 link to ESP32-C3 coprocessor
+ * @brief Main ESP32 RS-485 link to panel coprocessor
  */
 
 #include "coprocessor_link.h"
@@ -15,12 +15,18 @@ CoprocessorLink::CoprocessorLink(HardwareSerial& serial, int8_t de_re_pin)
       _cmd_sequence(0),
       _last_cmd_result(CP_CMD_RESULT_NONE),
       _last_nak_result(0),
-      _rx_len(0) {
+      _rx_len(0),
+      _mutex(NULL) {
     memset(&_telemetry, 0, sizeof(_telemetry));
+    memset(&_telemetry_copy, 0, sizeof(_telemetry_copy));
 }
 
 bool CoprocessorLink::begin(uint32_t baud) {
     _baud = baud;
+    if (_mutex == NULL) {
+        _mutex = xSemaphoreCreateMutex();
+        if (_mutex == NULL) return false;
+    }
     if (_de_re_pin >= 0) {
         pinMode((pin_size_t)_de_re_pin, OUTPUT);
         digitalWrite((pin_size_t)_de_re_pin, LOW);
@@ -167,7 +173,53 @@ void CoprocessorLink::_processFrame(const uint8_t* frame, size_t len) {
     }
 }
 
+const cp_link_telemetry_t& CoprocessorLink::getLastTelemetry() const {
+    if (_mutex != NULL && xSemaphoreTake(_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        memcpy((void*)&_telemetry_copy, &_telemetry, sizeof(_telemetry));
+        xSemaphoreGive(_mutex);
+    }
+    return _telemetry_copy;
+}
+
+bool CoprocessorLink::isCommsLost() const {
+    bool lost = true;
+    if (_mutex != NULL && xSemaphoreTake(_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        lost = _comms_lost;
+        xSemaphoreGive(_mutex);
+    }
+    return lost;
+}
+
+uint32_t CoprocessorLink::getCommsLostSinceMs() const {
+    uint32_t ms = 0;
+    if (_mutex != NULL && xSemaphoreTake(_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        ms = _comms_lost_since_ms;
+        xSemaphoreGive(_mutex);
+    }
+    return ms;
+}
+
+cp_cmd_result_t CoprocessorLink::getLastCommandResult() const {
+    cp_cmd_result_t r = CP_CMD_RESULT_NONE;
+    if (_mutex != NULL && xSemaphoreTake(_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        r = _last_cmd_result;
+        xSemaphoreGive(_mutex);
+    }
+    return r;
+}
+
+uint8_t CoprocessorLink::getLastNakResult() const {
+    uint8_t r = 0;
+    if (_mutex != NULL && xSemaphoreTake(_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        r = _last_nak_result;
+        xSemaphoreGive(_mutex);
+    }
+    return r;
+}
+
 void CoprocessorLink::poll() {
+    if (_mutex == NULL) return;
+    if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
     uint8_t frame[CP_MAX_FRAME];
     size_t len = 0;
     while (_readFrame(frame, &len, 0)) {
@@ -178,34 +230,53 @@ void CoprocessorLink::poll() {
         if (!_comms_lost) _comms_lost_since_ms = millis();
         _comms_lost = true;
     }
+    xSemaphoreGive(_mutex);
 }
 
 cp_cmd_result_t CoprocessorLink::sendBlowdownOpen() {
+    if (_mutex == NULL) return CP_CMD_RESULT_LINK_DOWN;
+    if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(100)) != pdTRUE) return CP_CMD_RESULT_TIMEOUT;
     cp_cmd_blowdown_open_t cmd;
     cmd.sequence = ++_cmd_sequence;
-    return _sendCommandAndWaitAck(CP_TYPE_CMD_BLOWDOWN_OPEN, (const uint8_t*)&cmd, sizeof(cmd));
+    cp_cmd_result_t r = _sendCommandAndWaitAck(CP_TYPE_CMD_BLOWDOWN_OPEN, (const uint8_t*)&cmd, sizeof(cmd));
+    xSemaphoreGive(_mutex);
+    return r;
 }
 
 cp_cmd_result_t CoprocessorLink::sendBlowdownClose() {
+    if (_mutex == NULL) return CP_CMD_RESULT_LINK_DOWN;
+    if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(100)) != pdTRUE) return CP_CMD_RESULT_TIMEOUT;
     cp_cmd_blowdown_close_t cmd;
     cmd.sequence = ++_cmd_sequence;
-    return _sendCommandAndWaitAck(CP_TYPE_CMD_BLOWDOWN_CLOSE, (const uint8_t*)&cmd, sizeof(cmd));
+    cp_cmd_result_t r = _sendCommandAndWaitAck(CP_TYPE_CMD_BLOWDOWN_CLOSE, (const uint8_t*)&cmd, sizeof(cmd));
+    xSemaphoreGive(_mutex);
+    return r;
 }
 
 cp_cmd_result_t CoprocessorLink::sendSolenoid(bool on) {
+    if (_mutex == NULL) return CP_CMD_RESULT_LINK_DOWN;
+    if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(100)) != pdTRUE) return CP_CMD_RESULT_TIMEOUT;
     cp_cmd_solenoid_t cmd;
     cmd.sequence = ++_cmd_sequence;
     cmd.on = on ? 1 : 0;
-    return _sendCommandAndWaitAck(CP_TYPE_CMD_SOLENOID, (const uint8_t*)&cmd, sizeof(cmd));
+    cp_cmd_result_t r = _sendCommandAndWaitAck(CP_TYPE_CMD_SOLENOID, (const uint8_t*)&cmd, sizeof(cmd));
+    xSemaphoreGive(_mutex);
+    return r;
 }
 
 cp_cmd_result_t CoprocessorLink::sendSampleRequest() {
+    if (_mutex == NULL) return CP_CMD_RESULT_LINK_DOWN;
+    if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(100)) != pdTRUE) return CP_CMD_RESULT_TIMEOUT;
     cp_cmd_sample_request_t cmd;
     cmd.sequence = ++_cmd_sequence;
-    return _sendCommandAndWaitAck(CP_TYPE_CMD_SAMPLE_REQUEST, (const uint8_t*)&cmd, sizeof(cmd));
+    cp_cmd_result_t r = _sendCommandAndWaitAck(CP_TYPE_CMD_SAMPLE_REQUEST, (const uint8_t*)&cmd, sizeof(cmd));
+    xSemaphoreGive(_mutex);
+    return r;
 }
 
 void CoprocessorLink::sendTimeSync(uint32_t unix_sec, uint32_t subsec_ms) {
+    if (_mutex == NULL) return;
+    if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(50)) != pdTRUE) return;
     cp_time_sync_payload_t pl;
     pl.unix_time_sec = unix_sec;
     pl.unix_time_subsec_ms = subsec_ms;
@@ -213,4 +284,5 @@ void CoprocessorLink::sendTimeSync(uint32_t unix_sec, uint32_t subsec_ms) {
     delay(1);
     _sendFrame(CP_TYPE_TIME_SYNC, (const uint8_t*)&pl, sizeof(pl));
     _setDeRe(false);
+    xSemaphoreGive(_mutex);
 }
