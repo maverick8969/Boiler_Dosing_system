@@ -32,6 +32,7 @@
 #include "data_logger.h"
 #include "sd_logger.h"
 #include "web_server.h"
+#include "mqtt_telemetry.h"
 #include "fuzzy_logic.h"
 #include "device_manager.h"
 #include "self_test.h"
@@ -86,6 +87,29 @@ TaskHandle_t taskLogging = NULL;
 static float s_cond_history_value = 0.0f;
 static uint32_t s_cond_history_time = 0;
 static bool s_cond_history_valid = false;
+
+// Pending API command (executed in control task context; Modern IoT Stack)
+#define PENDING_CMD_NAME_LEN       24
+#define PENDING_CMD_REQUEST_ID_LEN 48
+static struct {
+    char name[PENDING_CMD_NAME_LEN];
+    char request_id[PENDING_CMD_REQUEST_ID_LEN];
+    int8_t param_pump_index;       // for pump_prime: 0-2
+    uint32_t param_duration_ms;    // for pump_prime
+    bool pending;
+} s_pending_command = { "", "", -1, 0, false };
+
+static void setPendingCommand(const char* request_id, const char* name, int8_t pump_index = -1, uint32_t duration_ms = 5000) {
+    strncpy(s_pending_command.request_id, request_id ? request_id : "", PENDING_CMD_REQUEST_ID_LEN - 1);
+    s_pending_command.request_id[PENDING_CMD_REQUEST_ID_LEN - 1] = '\0';
+    strncpy(s_pending_command.name, name ? name : "", PENDING_CMD_NAME_LEN - 1);
+    s_pending_command.name[PENDING_CMD_NAME_LEN - 1] = '\0';
+    s_pending_command.param_pump_index = pump_index;
+    s_pending_command.param_duration_ms = duration_ms;
+    s_pending_command.pending = true;
+}
+
+static bool handleApiCommand(const char* request_id, const char* name, const JsonObject& params, String* outMessage);
 
 // ============================================================================
 // FUNCTION DECLARATIONS
@@ -206,6 +230,8 @@ void setup() {
         Serial.println("WARNING: Data logger initialization failed!");
     }
 
+    mqttTelemetry.begin(&systemConfig);
+
     // Connect to WiFi
     if (strlen(systemConfig.wifi_ssid) > 0) {
         display.showMessage("Connecting WiFi...", systemConfig.wifi_ssid);
@@ -220,6 +246,7 @@ void setup() {
 
     // Web server (accessible via AP hotspot at 192.168.4.1 and via STA IP)
     if (webServer.begin(&systemConfig, &fuzzyController)) {
+        webServer.setCommandHandler(handleApiCommand);
         Serial.printf("Web UI: http://%s/ (AP) or http://%s/ (STA)\n",
                       WiFi.softAPIP().toString().c_str(),
                       WiFi.localIP().toString().c_str());
@@ -393,6 +420,42 @@ void taskControlLoop(void* parameter) {
 
             vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(TASK_PERIOD_CONTROL_MS));
             continue;  // Skip normal control logic
+        }
+
+        // --- Pending API command (execute in control context; Modern IoT Stack) ---
+        if (s_pending_command.pending) {
+            char req_id[PENDING_CMD_REQUEST_ID_LEN];
+            char cmd_name[PENDING_CMD_NAME_LEN];
+            int8_t pump_idx = s_pending_command.param_pump_index;
+            uint32_t duration_ms = s_pending_command.param_duration_ms;
+            strncpy(req_id, s_pending_command.request_id, PENDING_CMD_REQUEST_ID_LEN - 1);
+            req_id[PENDING_CMD_REQUEST_ID_LEN - 1] = '\0';
+            strncpy(cmd_name, s_pending_command.name, PENDING_CMD_NAME_LEN - 1);
+            cmd_name[PENDING_CMD_NAME_LEN - 1] = '\0';
+            s_pending_command.pending = false;
+
+            if (strcmp(cmd_name, "blowdown_start") == 0) {
+                blowdownController.openValve();
+                webServer.broadcastCommandResult(req_id, "completed", "Blowdown started");
+                mqttTelemetry.publishCommandResult(req_id, "completed", "Blowdown started");
+            } else if (strcmp(cmd_name, "blowdown_stop") == 0) {
+                blowdownController.closeValve();
+                webServer.broadcastCommandResult(req_id, "completed", "Blowdown stopped");
+                mqttTelemetry.publishCommandResult(req_id, "completed", "Blowdown stopped");
+            } else if (strcmp(cmd_name, "pump_prime") == 0 && pump_idx >= 0 && pump_idx <= 2) {
+                ChemicalPump* p = pumpManager.getPump((pump_id_t)pump_idx);
+                if (p) {
+                    p->prime(duration_ms);
+                    webServer.broadcastCommandResult(req_id, "completed", "Pump prime started");
+                    mqttTelemetry.publishCommandResult(req_id, "completed", "Pump prime started");
+                } else {
+                    webServer.broadcastCommandResult(req_id, "failed", "Pump not available");
+                    mqttTelemetry.publishCommandResult(req_id, "failed", "Pump not available");
+                }
+            } else {
+                webServer.broadcastCommandResult(req_id, "failed", "Unknown or invalid command");
+                mqttTelemetry.publishCommandResult(req_id, "failed", "Unknown or invalid command");
+            }
         }
 
         // --- Feedwater pump monitoring (GPIO35 via optocoupler) ---
@@ -582,16 +645,25 @@ void taskDisplayLoop(void* parameter) {
     }
 }
 
+#define WS_STATE_PUSH_INTERVAL_MS  2000   // Push state to WebSocket clients every 2 s (Modern IoT Stack)
+#define MQTT_HEALTH_INTERVAL_MS    60000  // Publish MQTT health every 60 s (Phase C)
+
 void taskLoggingLoop(void* parameter) {
     esp_task_wdt_add(NULL);  // Subscribe this task to watchdog
     TickType_t lastWakeTime = xTaskGetTickCount();
     uint32_t lastLogTime = 0;
+    uint32_t lastWsPush = 0;
+    uint32_t lastMqttHealth = 0;
 
     while (true) {
         esp_task_wdt_reset();  // Feed the watchdog
 
         // Update data logger (handle WiFi reconnection, etc.)
         dataLogger.update();
+
+        // MQTT telemetry (Phase C): maintain connection, flush buffer
+        mqttTelemetry.update();
+        webServer.setMqttConnected(mqttTelemetry.isConnected());
 
         // Update SD logger (periodic flush)
         sdLogger.update();
@@ -606,11 +678,28 @@ void taskLoggingLoop(void* parameter) {
             waterMeterManager.getCombinedFlowRate()
         );
 
-        // Log sensor data at configured interval
+        // Periodic WebSocket state push (no polling; HMI gets live updates)
         uint32_t now = millis();
+        if (now - lastWsPush >= WS_STATE_PUSH_INTERVAL_MS) {
+            lastWsPush = now;
+            webServer.broadcastState();
+        }
+
+        // Log sensor data at configured interval
         if (now - lastLogTime >= systemConfig.log_interval_ms) {
             lastLogTime = now;
             logSensorData();
+        }
+
+        // MQTT health heartbeat (Phase C)
+        if (now - lastMqttHealth >= MQTT_HEALTH_INTERVAL_MS) {
+            lastMqttHealth = now;
+            mqttTelemetry.publishHealth(
+                (uint32_t)(now / 1000),
+                ESP.getFreeHeap(),
+                (WiFi.status() == WL_CONNECTED),
+                systemState.active_alarms
+            );
         }
 
         // Wait for next cycle
@@ -622,30 +711,68 @@ void taskLoggingLoop(void* parameter) {
 // CONFIGURATION MANAGEMENT
 // ============================================================================
 
+// Apply defaults for MQTT/telemetry fields only (e.g. after migration from older config)
+static void applyMqttConfigDefaults() {
+    memset(systemConfig.mqtt_host, 0, sizeof(systemConfig.mqtt_host));
+    systemConfig.mqtt_port = MQTT_PORT_DEFAULT;
+    memset(systemConfig.mqtt_user, 0, sizeof(systemConfig.mqtt_user));
+    memset(systemConfig.mqtt_pass, 0, sizeof(systemConfig.mqtt_pass));
+    systemConfig.use_mqtt_telemetry = false;
+}
+
 void loadConfiguration() {
     Serial.println("Loading configuration from NVS...");
 
     preferences.begin(NVS_NAMESPACE, true);  // Read-only
 
-    // Check if config exists
     size_t config_size = preferences.getBytesLength(NVS_KEY_CONFIG);
+
+    if (config_size == 0) {
+        Serial.println("No configuration found - initializing defaults");
+        preferences.end();
+        initializeDefaults();
+        return;
+    }
 
     if (config_size == sizeof(system_config_t)) {
         preferences.getBytes(NVS_KEY_CONFIG, &systemConfig, sizeof(system_config_t));
-
-        // Validate magic number
+        preferences.end();
         if (systemConfig.magic != CONFIG_MAGIC) {
             Serial.println("Invalid config magic - initializing defaults");
             initializeDefaults();
         } else {
             Serial.println("Configuration loaded successfully");
         }
-    } else {
-        Serial.println("No valid configuration found - initializing defaults");
-        initializeDefaults();
+        return;
     }
 
+    // Migration: stored config is from older firmware (smaller struct)
+    if (config_size < sizeof(system_config_t)) {
+        memset(&systemConfig, 0, sizeof(system_config_t));
+        preferences.getBytes(NVS_KEY_CONFIG, &systemConfig, config_size);
+        preferences.end();
+        if (systemConfig.magic != CONFIG_MAGIC) {
+            Serial.println("Invalid config magic after migration - initializing defaults");
+            initializeDefaults();
+            return;
+        }
+        // Zero the remainder and set defaults for new MQTT/telemetry fields
+        memset((uint8_t*)&systemConfig + config_size, 0, sizeof(system_config_t) - config_size);
+        applyMqttConfigDefaults();
+        Serial.println("Configuration migrated (older size); MQTT defaults applied");
+        saveConfiguration();
+        return;
+    }
+
+    // Stored blob larger than current struct (e.g. newer firmware was reverted)
+    preferences.getBytes(NVS_KEY_CONFIG, &systemConfig, sizeof(system_config_t));
     preferences.end();
+    if (systemConfig.magic != CONFIG_MAGIC) {
+        Serial.println("Invalid config magic - initializing defaults");
+        initializeDefaults();
+    } else {
+        Serial.println("Configuration loaded successfully (truncated from larger blob)");
+    }
 }
 
 void saveConfiguration() {
@@ -660,6 +787,38 @@ void saveConfiguration() {
     preferences.end();
 
     Serial.println("Configuration saved");
+}
+
+// API command handler: validate and queue for execution in control task (Modern IoT Stack)
+static bool handleApiCommand(const char* request_id, const char* name, const JsonObject& params, String* outMessage) {
+    if (!request_id || !name || !outMessage) return false;
+
+    if (strcmp(name, "blowdown_start") == 0) {
+        if (blowdownController.isActive()) {
+            *outMessage = "Blowdown already active";
+            return false;
+        }
+        setPendingCommand(request_id, name);
+        return true;
+    }
+    if (strcmp(name, "blowdown_stop") == 0) {
+        setPendingCommand(request_id, name);
+        return true;
+    }
+    if (strcmp(name, "pump_prime") == 0) {
+        int pump = params["pump"] | -1;
+        if (pump < 0 || pump > 2) {
+            *outMessage = "pump index 0-2 required";
+            return false;
+        }
+        uint32_t duration_ms = params["duration_ms"] | 5000;
+        if (duration_ms < 500 || duration_ms > 60000) duration_ms = 5000;
+        setPendingCommand(request_id, name, (int8_t)pump, duration_ms);
+        return true;
+    }
+
+    *outMessage = "Unknown command";
+    return false;
 }
 
 void initializeDefaults() {
@@ -757,6 +916,13 @@ void initializeDefaults() {
     // Network defaults
     systemConfig.tsdb_port = TSDB_HTTP_PORT;
     systemConfig.log_interval_ms = TSDB_LOG_INTERVAL_MS;
+
+    // MQTT telemetry defaults (Modern IoT Stack)
+    memset(systemConfig.mqtt_host, 0, sizeof(systemConfig.mqtt_host));
+    systemConfig.mqtt_port = MQTT_PORT_DEFAULT;
+    memset(systemConfig.mqtt_user, 0, sizeof(systemConfig.mqtt_user));
+    memset(systemConfig.mqtt_pass, 0, sizeof(systemConfig.mqtt_pass));
+    systemConfig.use_mqtt_telemetry = false;   // default legacy HTTP until broker configured
 
     // Security defaults
     systemConfig.access_code = 2222;
@@ -860,35 +1026,43 @@ void checkAlarms() {
     // --- Rising edge (new alarms) ---
     uint16_t rising_alarms = new_alarms & ~systemState.active_alarms;
 
+    uint32_t ts = dataLogger.getTimestamp();
     if (rising_alarms & ALARM_COND_HIGH) {
         dataLogger.logAlarm(ALARM_COND_HIGH, "HIGH CONDUCTIVITY", true, cond);
+        mqttTelemetry.publishAlarm(ALARM_COND_HIGH, "HIGH CONDUCTIVITY", true, cond, ts);
         display.showAlarm("HIGH CONDUCTIVITY");
     }
     if (rising_alarms & ALARM_COND_LOW) {
         dataLogger.logAlarm(ALARM_COND_LOW, "LOW CONDUCTIVITY", true, cond);
+        mqttTelemetry.publishAlarm(ALARM_COND_LOW, "LOW CONDUCTIVITY", true, cond, ts);
         display.showAlarm("LOW CONDUCTIVITY");
     }
     if (rising_alarms & ALARM_BLOWDOWN_TIMEOUT) {
         dataLogger.logAlarm(ALARM_BLOWDOWN_TIMEOUT, "BLOWDOWN TIMEOUT", true, 0);
+        mqttTelemetry.publishAlarm(ALARM_BLOWDOWN_TIMEOUT, "BLOWDOWN TIMEOUT", true, 0, ts);
         display.showAlarm("BLOWDOWN TIMEOUT");
     }
     if (rising_alarms & ALARM_SENSOR_ERROR) {
         dataLogger.logAlarm(ALARM_SENSOR_ERROR, "SENSOR ERROR", true, 0);
+        mqttTelemetry.publishAlarm(ALARM_SENSOR_ERROR, "SENSOR ERROR", true, 0, ts);
         display.showAlarm("SENSOR ERROR");
     }
     if (rising_alarms & ALARM_VALVE_FAULT) {
         dataLogger.logAlarm(ALARM_VALVE_FAULT, "VALVE FAULT",
                             true, blowdownController.getFeedbackmA());
+        mqttTelemetry.publishAlarm(ALARM_VALVE_FAULT, "VALVE FAULT", true, blowdownController.getFeedbackmA(), ts);
         display.showAlarm("VALVE FAULT");
     }
     if (rising_alarms & ALARM_STALE_DATA) {
         dataLogger.logAlarm(ALARM_STALE_DATA, "STALE DATA", true,
                             (float)sensorHealth.getMeasurementAge());
+        mqttTelemetry.publishAlarm(ALARM_STALE_DATA, "STALE DATA", true, (float)sensorHealth.getMeasurementAge(), ts);
         display.showAlarm("STALE DATA");
     }
     if (rising_alarms & ALARM_SAFE_MODE) {
         dataLogger.logAlarm(ALARM_SAFE_MODE, "SAFE MODE", true,
                             (float)sensorHealth.getSafeMode());
+        mqttTelemetry.publishAlarm(ALARM_SAFE_MODE, "SAFE MODE", true, (float)sensorHealth.getSafeMode(), ts);
         display.showAlarm("SAFE MODE");
     }
 
@@ -897,24 +1071,31 @@ void checkAlarms() {
 
     if (falling_alarms & ALARM_COND_HIGH) {
         dataLogger.logAlarm(ALARM_COND_HIGH, "HIGH CONDUCTIVITY", false, cond);
+        mqttTelemetry.publishAlarm(ALARM_COND_HIGH, "HIGH CONDUCTIVITY", false, cond, ts);
     }
     if (falling_alarms & ALARM_COND_LOW) {
         dataLogger.logAlarm(ALARM_COND_LOW, "LOW CONDUCTIVITY", false, cond);
+        mqttTelemetry.publishAlarm(ALARM_COND_LOW, "LOW CONDUCTIVITY", false, cond, ts);
     }
     if (falling_alarms & ALARM_BLOWDOWN_TIMEOUT) {
         dataLogger.logAlarm(ALARM_BLOWDOWN_TIMEOUT, "BLOWDOWN TIMEOUT", false, 0);
+        mqttTelemetry.publishAlarm(ALARM_BLOWDOWN_TIMEOUT, "BLOWDOWN TIMEOUT", false, 0, ts);
     }
     if (falling_alarms & ALARM_SENSOR_ERROR) {
         dataLogger.logAlarm(ALARM_SENSOR_ERROR, "SENSOR ERROR", false, 0);
+        mqttTelemetry.publishAlarm(ALARM_SENSOR_ERROR, "SENSOR ERROR", false, 0, ts);
     }
     if (falling_alarms & ALARM_VALVE_FAULT) {
         dataLogger.logAlarm(ALARM_VALVE_FAULT, "VALVE FAULT", false, 0);
+        mqttTelemetry.publishAlarm(ALARM_VALVE_FAULT, "VALVE FAULT", false, 0, ts);
     }
     if (falling_alarms & ALARM_STALE_DATA) {
         dataLogger.logAlarm(ALARM_STALE_DATA, "STALE DATA", false, 0);
+        mqttTelemetry.publishAlarm(ALARM_STALE_DATA, "STALE DATA", false, 0, ts);
     }
     if (falling_alarms & ALARM_SAFE_MODE) {
         dataLogger.logAlarm(ALARM_SAFE_MODE, "SAFE MODE", false, 0);
+        mqttTelemetry.publishAlarm(ALARM_SAFE_MODE, "SAFE MODE", false, 0, ts);
     }
 
     if (falling_alarms) {
@@ -1015,6 +1196,9 @@ void logSensorData() {
     // Log to TimescaleDB (via WiFi) and/or RAM buffer
     dataLogger.logReading(&reading);
 
+    // MQTT telemetry (Phase C): publish to device/{id}/metrics or buffer if offline
+    mqttTelemetry.publishReading(&reading);
+
     // Log to SD card (always-on local storage)
     sdLogger.logReading(&reading);
 }
@@ -1047,6 +1231,8 @@ void updateFeedwaterPumpMonitor() {
             Serial.printf("[FW PUMP] ON  — cycle #%u\n", systemState.fw_pump_cycle_count);
             dataLogger.logEvent("FW_PUMP_ON", "Feedwater pump started",
                                 systemState.fw_pump_cycle_count);
+            mqttTelemetry.publishEvent("FW_PUMP_ON", "Feedwater pump started",
+                                      systemState.fw_pump_cycle_count, dataLogger.getTimestamp());
             sdLogger.logEvent("FW_PUMP_ON", "Feedwater pump started",
                               systemState.fw_pump_cycle_count);
         }
@@ -1064,6 +1250,7 @@ void updateFeedwaterPumpMonitor() {
                           cycle_sec, systemState.fw_pump_on_time_sec,
                           systemState.fw_pump_cycle_count);
             dataLogger.logEvent("FW_PUMP_OFF", "Feedwater pump stopped", cycle_sec);
+            mqttTelemetry.publishEvent("FW_PUMP_OFF", "Feedwater pump stopped", cycle_sec, dataLogger.getTimestamp());
             sdLogger.logEvent("FW_PUMP_OFF", "Feedwater pump stopped", cycle_sec);
         }
 

@@ -109,6 +109,11 @@ void DataLogger::update() {
     // Check WiFi connection
     handleWiFiEvents();
 
+    // Phase D: When MQTT telemetry is enabled, skip HTTP buffer flush
+    if (_config && _config->use_mqtt_telemetry) {
+        return;
+    }
+
     // Try to upload buffered data
     if (_wifi_connected && _buffer_count > 0) {
         uploadBuffered();
@@ -130,6 +135,12 @@ void DataLogger::logReading(sensor_reading_t* reading) {
         reading->timestamp = getTimestamp();
     }
 
+    // Phase D: When MQTT telemetry is enabled, skip HTTP upload and HTTP buffer
+    // (telemetry is sent via MqttTelemetry from main; no dual path)
+    if (_config && _config->use_mqtt_telemetry) {
+        return;
+    }
+
     // Try to upload immediately if connected
     if (_wifi_connected) {
         if (uploadReading(reading)) {
@@ -147,6 +158,12 @@ void DataLogger::logReading(sensor_reading_t* reading) {
 void DataLogger::logEvent(const char* event_type, const char* description, int32_t value) {
     if (!_enabled) return;
 
+    // Phase D: When MQTT telemetry is enabled, skip HTTP upload (events sent via MQTT from main)
+    if (_config && _config->use_mqtt_telemetry) {
+        Serial.printf("Event: %s - %s (%d)\n", event_type, description, value);
+        return;
+    }
+
     event_log_t event;
     event.timestamp = getTimestamp();
     strncpy(event.event_type, event_type, sizeof(event.event_type) - 1);
@@ -163,6 +180,13 @@ void DataLogger::logEvent(const char* event_type, const char* description, int32
 void DataLogger::logAlarm(uint16_t alarm_code, const char* alarm_name,
                           bool active, float trigger_value) {
     if (!_enabled) return;
+
+    // Phase D: When MQTT telemetry is enabled, skip HTTP upload (alarms sent via MQTT from main)
+    if (_config && _config->use_mqtt_telemetry) {
+        Serial.printf("Alarm: %s - %s (%.2f)\n", alarm_name,
+                      active ? "ACTIVE" : "CLEARED", trigger_value);
+        return;
+    }
 
     alarm_log_t alarm;
     alarm.timestamp = getTimestamp();
@@ -277,6 +301,7 @@ uint32_t DataLogger::getTimestamp() {
 
 bool DataLogger::uploadReading(sensor_reading_t* reading) {
     if (!_config || strlen(_config->tsdb_host) == 0) return false;
+    if (_config->use_mqtt_telemetry) return false;  // Phase D: telemetry via MQTT only
 
     String url = "http://" + String(_config->tsdb_host) + ":" +
                  String(_config->tsdb_port) + "/api/readings";
@@ -303,6 +328,7 @@ bool DataLogger::uploadReading(sensor_reading_t* reading) {
 
 bool DataLogger::uploadEvent(event_log_t* event) {
     if (!_config || strlen(_config->tsdb_host) == 0) return false;
+    if (_config->use_mqtt_telemetry) return false;  // Phase D: telemetry via MQTT only
 
     String url = "http://" + String(_config->tsdb_host) + ":" +
                  String(_config->tsdb_port) + "/api/events/pump";
@@ -324,6 +350,7 @@ bool DataLogger::uploadEvent(event_log_t* event) {
 
 bool DataLogger::uploadAlarm(alarm_log_t* alarm) {
     if (!_config || strlen(_config->tsdb_host) == 0) return false;
+    if (_config->use_mqtt_telemetry) return false;  // Phase D: telemetry via MQTT only
 
     String url = "http://" + String(_config->tsdb_host) + ":" +
                  String(_config->tsdb_port) + "/api/alarms";

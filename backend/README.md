@@ -135,6 +135,23 @@ Update these values in ESP32 firmware `config.h`:
 
 All POST endpoints require `X-API-Key` header.
 
+### MQTT Gateway (Phase E)
+
+When the ESP32 uses **MQTT telemetry** (`use_mqtt_telemetry` in config), the API server can also subscribe to MQTT and write to TimescaleDB. Set in `.env`:
+
+- `MQTT_URL=mqtt://broker-host:1883` — MQTT broker URL
+- `MQTT_ENABLED=true` — enable gateway (default: true)
+
+The gateway subscribes to `device/+/metrics`, `device/+/alarm`, and `device/+/health`, extracts `device_id` from the topic, and inserts into `sensor_readings`, `alarms`, `pump_events`, and `system_status` with a `device_id` column. See **`docs/MQTT_Telemetry_Schema.md`** for topic and payload format.
+
+**Database migration (existing installs):** If the database was created before Phase E, run the migration to add `device_id` columns:
+
+```bash
+docker exec -i boiler_timescaledb psql -U boiler boiler_data < db/migrations/001_add_device_id.sql
+```
+
+New installs use the updated `db/init.sql` which already includes `device_id`.
+
 ## Data Retention
 
 Automatic data retention policies:

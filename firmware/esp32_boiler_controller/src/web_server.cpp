@@ -1,15 +1,20 @@
 /**
  * @file web_server.cpp
- * @brief ESP32 Web Server Implementation
+ * @brief ESP32 Async Web Server + WebSocket (Modern IoT Stack HMI)
  */
 
 #include "web_server.h"
 #include "ph_estimator.h"
+#include "device_identity.h"
 #include "device_manager.h"
 #include "sensor_health.h"
 #include "self_test.h"
 #include "sd_logger.h"
+#include "config.h"
 #include <WiFi.h>
+
+extern system_state_t_runtime systemState;
+extern void saveConfiguration();
 
 // Global instance
 BoilerWebServer webServer;
@@ -20,13 +25,16 @@ BoilerWebServer webServer;
 
 BoilerWebServer::BoilerWebServer()
     : _server(WEB_SERVER_PORT)
+    , _ws(WEB_WS_PATH)
     , _config(nullptr)
     , _fuzzy(nullptr)
     , _running(false)
+    , _mqtt_connected(false)
     , _current_conductivity(0)
     , _current_temperature(0)
     , _current_flow_rate(0)
     , _test_input_callback(nullptr)
+    , _command_handler(nullptr)
 {
     memset(&_current_fuzzy_result, 0, sizeof(_current_fuzzy_result));
     memset(_manual_tests, 0, sizeof(_manual_tests));
@@ -40,25 +48,16 @@ bool BoilerWebServer::begin(system_config_t* config, FuzzyController* fuzzy) {
     _config = config;
     _fuzzy = fuzzy;
 
-    // Setup routes
-    _server.on("/", HTTP_GET, [this]() { handleRoot(); });
-    _server.on("/api/status", HTTP_GET, [this]() { handleGetStatus(); });
-    _server.on("/api/fuzzy", HTTP_GET, [this]() { handleGetFuzzy(); });
-    _server.on("/api/devices", HTTP_GET, [this]() { handleGetDevices(); });
-    _server.on("/api/sd/status", HTTP_GET, [this]() { handleGetSDStatus(); });
-    _server.on("/api/sd/format", HTTP_POST, [this]() { handlePostSDFormat(); });
-    _server.on("/api/sd/format", HTTP_OPTIONS, [this]() { sendCORSHeaders(); _server.send(204); });
-    _server.on("/api/tests", HTTP_GET, [this]() { handleGetTests(); });
-    _server.on("/api/tests", HTTP_POST, [this]() { handlePostTest(); });
-    _server.on("/api/tests", HTTP_DELETE, [this]() { handleClearTests(); });
-    _server.on("/api/tests", HTTP_OPTIONS, [this]() { sendCORSHeaders(); _server.send(204); });
+    _ws.onEvent([this](AsyncWebSocket* server, AsyncWebSocketClient* client, AwsEventType type, void* arg, uint8_t* data, size_t len) {
+        this->onWsEvent(server, client, type, arg, data, len);
+    });
+    _server.addHandler(&_ws);
 
-    _server.onNotFound([this]() { handleNotFound(); });
-
+    setupRoutes();
     _server.begin();
     _running = true;
 
-    Serial.printf("Web server started on port %d\n", WEB_SERVER_PORT);
+    Serial.printf("Web server started on port %d (Async + WebSocket %s)\n", WEB_SERVER_PORT, WEB_WS_PATH);
     Serial.printf("  AP:  http://%s/\n", WiFi.softAPIP().toString().c_str());
     if (WiFi.status() == WL_CONNECTED) {
         Serial.printf("  STA: http://%s/\n", WiFi.localIP().toString().c_str());
@@ -69,12 +68,76 @@ bool BoilerWebServer::begin(system_config_t* config, FuzzyController* fuzzy) {
 
 void BoilerWebServer::handleClient() {
     if (_running) {
-        _server.handleClient();
+        _ws.cleanupClients();
+    }
+}
+
+void BoilerWebServer::broadcastWs(const char* type, const char* payloadJson) {
+    JsonDocument doc;
+    doc["type"] = type;
+    if (payloadJson && payloadJson[0] != '\0') {
+        JsonDocument payloadDoc;
+        if (deserializeJson(payloadDoc, payloadJson) == DeserializationError::Ok) {
+            doc["payload"] = payloadDoc.as<JsonObject>();
+        } else {
+            doc["payload"] = payloadJson;
+        }
+    }
+    String msg;
+    serializeJson(doc, msg);
+    _ws.textAll(msg.c_str());
+}
+
+void BoilerWebServer::broadcastCommandResult(const char* request_id, const char* result, const char* message) {
+    JsonDocument doc;
+    doc["request_id"] = request_id;
+    doc["result"] = result;
+    if (message && message[0] != '\0') doc["message"] = message;
+    String payload;
+    serializeJson(doc, payload);
+    broadcastWs("command_result", payload.c_str());
+}
+
+void BoilerWebServer::broadcastState() {
+    String payload = buildStateJson();
+    broadcastWs("state", payload.c_str());
+}
+
+void BoilerWebServer::setupRoutes() {
+    _server.on("/", HTTP_GET, [this](AsyncWebServerRequest* r) { handleRoot(r); });
+    _server.on("/api/status", HTTP_GET, [this](AsyncWebServerRequest* r) { handleGetStatus(r); });
+    _server.on("/api/state", HTTP_GET, [this](AsyncWebServerRequest* r) { handleGetState(r); });
+    _server.on("/api/health", HTTP_GET, [this](AsyncWebServerRequest* r) { handleGetHealth(r); });
+    _server.on("/api/fuzzy", HTTP_GET, [this](AsyncWebServerRequest* r) { handleGetFuzzy(r); });
+    _server.on("/api/devices", HTTP_GET, [this](AsyncWebServerRequest* r) { handleGetDevices(r); });
+    _server.on("/api/sd/status", HTTP_GET, [this](AsyncWebServerRequest* r) { handleGetSDStatus(r); });
+    _server.on("/api/sd/format", HTTP_POST, [this](AsyncWebServerRequest* r) { handlePostSDFormat(r); });
+    _server.on("/api/sd/format", HTTP_OPTIONS, [this](AsyncWebServerRequest* r) { sendCORSHeaders(r); r->send(204); });
+    _server.on("/api/tests", HTTP_GET, [this](AsyncWebServerRequest* r) { handleGetTests(r); });
+    _server.on("/api/tests", HTTP_POST, [this](AsyncWebServerRequest* r) { handlePostTest(r); });
+    _server.on("/api/tests", HTTP_DELETE, [this](AsyncWebServerRequest* r) { handleClearTests(r); });
+    _server.on("/api/tests", HTTP_OPTIONS, [this](AsyncWebServerRequest* r) { sendCORSHeaders(r); r->send(204); });
+    _server.on("/api/command", HTTP_POST, [this](AsyncWebServerRequest* r) { handlePostCommand(r); });
+    _server.on("/api/config", HTTP_POST, [this](AsyncWebServerRequest* r) { handlePostConfig(r); });
+    _server.onNotFound([this](AsyncWebServerRequest* r) { handleNotFound(r); });
+}
+
+void BoilerWebServer::onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client, AwsEventType type, void* arg, uint8_t* data, size_t len) {
+    if (type == WS_EVT_CONNECT) {
+        JsonDocument payloadDoc;
+        deserializeJson(payloadDoc, buildStateJson());
+        JsonDocument envelope;
+        envelope["type"] = "state";
+        envelope["payload"] = payloadDoc.as<JsonObject>();
+        String msg;
+        serializeJson(envelope, msg);
+        client->text(msg.c_str());
     }
 }
 
 void BoilerWebServer::stop() {
-    _server.stop();
+    _ws.closeAll();
+    _server.end();
     _running = false;
 }
 
@@ -142,33 +205,27 @@ void BoilerWebServer::applyEstimatedPhIfNeeded() {
 // CORS HEADERS
 // ============================================================================
 
-void BoilerWebServer::sendCORSHeaders() {
-    _server.sendHeader("Access-Control-Allow-Origin", "*");
-    _server.sendHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
-    _server.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+void BoilerWebServer::sendCORSHeaders(AsyncWebServerRequest* request) {
+    request->addHeader("Access-Control-Allow-Origin", "*");
+    request->addHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+    request->addHeader("Access-Control-Allow-Headers", "Content-Type");
 }
 
 // ============================================================================
-// ROUTE HANDLERS
+// STATE / HEALTH (Modern IoT Stack)
 // ============================================================================
 
-void BoilerWebServer::handleRoot() {
-    _server.send(200, "text/html", generateIndexHTML());
-}
-
-void BoilerWebServer::handleGetStatus() {
-    sendCORSHeaders();
-
+String BoilerWebServer::buildStateJson() {
     JsonDocument doc;
-
+    char device_id_buf[DEVICE_ID_MAX_LEN];
+    device_id_get(device_id_buf, sizeof(device_id_buf));
+    doc["device_id"] = device_id_buf;
     doc["conductivity"] = _current_conductivity;
     doc["temperature"] = _current_temperature;
     doc["flow_rate"] = _current_flow_rate;
     doc["wifi_rssi"] = WiFi.RSSI();
     doc["uptime"] = millis() / 1000;
     doc["free_heap"] = ESP.getFreeHeap();
-
-    // Health & diagnostics
     JsonObject health = doc["health"].to<JsonObject>();
     health["safe_mode"] = sensorHealth.getSafeModeString();
     health["safe_mode_code"] = (uint8_t)sensorHealth.getSafeMode();
@@ -180,8 +237,6 @@ void BoilerWebServer::handleGetStatus() {
     health["measurement_age_ms"] = sensorHealth.getMeasurementAge();
     health["devices_operational"] = deviceManager.countOperational();
     health["devices_faulted"] = deviceManager.countFaulted();
-
-    // Sensor health details
     const sensor_health_t* cond = sensorHealth.getConductivityHealth();
     const sensor_health_t* temp = sensorHealth.getTemperatureHealth();
     JsonObject cond_h = health["conductivity"].to<JsonObject>();
@@ -189,14 +244,11 @@ void BoilerWebServer::handleGetStatus() {
     cond_h["total_failures"] = cond->total_failures;
     cond_h["faulted"] = cond->faulted;
     cond_h["stale"] = cond->stale;
-
     JsonObject temp_h = health["temperature"].to<JsonObject>();
     temp_h["consecutive_failures"] = temp->consecutive_failures;
     temp_h["total_failures"] = temp->total_failures;
     temp_h["faulted"] = temp->faulted;
     temp_h["stale"] = temp->stale;
-
-    // POST results
     self_test_result_t post = selfTest.getLastResult();
     JsonObject post_obj = doc["post"].to<JsonObject>();
     post_obj["total_tested"] = post.total_tested;
@@ -205,41 +257,68 @@ void BoilerWebServer::handleGetStatus() {
     post_obj["total_skipped"] = post.total_skipped;
     post_obj["critical_failure"] = post.critical_failure;
     post_obj["reset_reason"] = post.reset_reason ? post.reset_reason : "UNKNOWN";
-
-    // Manual test values
     JsonObject tests = doc["manual_tests"].to<JsonObject>();
     tests["tds"]["value"] = _manual_tests[0].value;
     tests["tds"]["valid"] = _manual_tests[0].valid;
-    tests["tds"]["age_min"] = _manual_tests[0].valid ?
-        (millis() - _manual_tests[0].timestamp) / 60000 : -1;
-
+    tests["tds"]["age_min"] = _manual_tests[0].valid ? (int)((millis() - _manual_tests[0].timestamp) / 60000) : -1;
     tests["alkalinity"]["value"] = _manual_tests[1].value;
     tests["alkalinity"]["valid"] = _manual_tests[1].valid;
-    tests["alkalinity"]["age_min"] = _manual_tests[1].valid ?
-        (millis() - _manual_tests[1].timestamp) / 60000 : -1;
-
+    tests["alkalinity"]["age_min"] = _manual_tests[1].valid ? (int)((millis() - _manual_tests[1].timestamp) / 60000) : -1;
     tests["sulfite"]["value"] = _manual_tests[2].value;
     tests["sulfite"]["valid"] = _manual_tests[2].valid;
-    tests["sulfite"]["age_min"] = _manual_tests[2].valid ?
-        (millis() - _manual_tests[2].timestamp) / 60000 : -1;
-
+    tests["sulfite"]["age_min"] = _manual_tests[2].valid ? (int)((millis() - _manual_tests[2].timestamp) / 60000) : -1;
     tests["ph"]["value"] = _manual_tests[3].value;
     tests["ph"]["valid"] = _manual_tests[3].valid;
-    tests["ph"]["age_min"] = _manual_tests[3].valid ?
-        (millis() - _manual_tests[3].timestamp) / 60000 : -1;
-
+    tests["ph"]["age_min"] = _manual_tests[3].valid ? (int)((millis() - _manual_tests[3].timestamp) / 60000) : -1;
     tests["p_alkalinity"]["value"] = _manual_tests[4].value;
     tests["p_alkalinity"]["valid"] = _manual_tests[4].valid;
-    tests["p_alkalinity"]["age_min"] = _manual_tests[4].valid ?
-        (millis() - _manual_tests[4].timestamp) / 60000 : -1;
-
-    String response;
-    serializeJson(doc, response);
-    _server.send(200, "application/json", response);
+    tests["p_alkalinity"]["age_min"] = _manual_tests[4].valid ? (int)((millis() - _manual_tests[4].timestamp) / 60000) : -1;
+    String out;
+    serializeJson(doc, out);
+    return out;
 }
 
-void BoilerWebServer::handleGetFuzzy() {
-    sendCORSHeaders();
+String BoilerWebServer::buildHealthJson() {
+    JsonDocument doc;
+    char device_id_buf[DEVICE_ID_MAX_LEN];
+    device_id_get(device_id_buf, sizeof(device_id_buf));
+    doc["device_id"] = device_id_buf;
+    doc["uptime_sec"] = (uint32_t)(millis() / 1000);
+    doc["free_heap"] = ESP.getFreeHeap();
+    doc["wifi_connected"] = (WiFi.status() == WL_CONNECTED);
+    doc["mqtt_connected"] = _mqtt_connected;
+    doc["active_alarms"] = systemState.active_alarms;
+    doc["firmware"] = FIRMWARE_VERSION_STRING;
+    String out;
+    serializeJson(doc, out);
+    return out;
+}
+
+// ============================================================================
+// ROUTE HANDLERS
+// ============================================================================
+
+void BoilerWebServer::handleRoot(AsyncWebServerRequest* request) {
+    request->send(200, "text/html", generateIndexHTML());
+}
+
+void BoilerWebServer::handleGetStatus(AsyncWebServerRequest* request) {
+    sendCORSHeaders(request);
+    request->send(200, "application/json", buildStateJson());
+}
+
+void BoilerWebServer::handleGetState(AsyncWebServerRequest* request) {
+    sendCORSHeaders(request);
+    request->send(200, "application/json", buildStateJson());
+}
+
+void BoilerWebServer::handleGetHealth(AsyncWebServerRequest* request) {
+    sendCORSHeaders(request);
+    request->send(200, "application/json", buildHealthJson());
+}
+
+void BoilerWebServer::handleGetFuzzy(AsyncWebServerRequest* request) {
+    sendCORSHeaders(request);
 
     JsonDocument doc;
 
@@ -279,11 +358,11 @@ void BoilerWebServer::handleGetFuzzy() {
 
     String response;
     serializeJson(doc, response);
-    _server.send(200, "application/json", response);
+    request->send(200, "application/json", response);
 }
 
-void BoilerWebServer::handleGetDevices() {
-    sendCORSHeaders();
+void BoilerWebServer::handleGetDevices(AsyncWebServerRequest* request) {
+    sendCORSHeaders(request);
 
     JsonDocument doc;
 
@@ -318,11 +397,11 @@ void BoilerWebServer::handleGetDevices() {
 
     String response;
     serializeJson(doc, response);
-    _server.send(200, "application/json", response);
+    request->send(200, "application/json", response);
 }
 
-void BoilerWebServer::handleGetSDStatus() {
-    sendCORSHeaders();
+void BoilerWebServer::handleGetSDStatus(AsyncWebServerRequest* request) {
+    sendCORSHeaders(request);
 
     JsonDocument doc;
 
@@ -348,24 +427,24 @@ void BoilerWebServer::handleGetSDStatus() {
 
     String response;
     serializeJson(doc, response);
-    _server.send(200, "application/json", response);
+    request->send(200, "application/json", response);
 }
 
-void BoilerWebServer::handlePostSDFormat() {
-    sendCORSHeaders();
+void BoilerWebServer::handlePostSDFormat(AsyncWebServerRequest* request) {
+    sendCORSHeaders(request);
 
     // Require explicit confirmation to prevent accidental data loss
-    if (!_server.hasArg("plain")) {
-        _server.send(400, "application/json",
+    if (request->arg("plain").length() == 0) {
+        request->send(400, "application/json",
             "{\"error\":\"POST body required with {\\\"confirm\\\":true}\"}");
         return;
     }
 
     JsonDocument doc;
-    DeserializationError error = deserializeJson(doc, _server.arg("plain"));
+    DeserializationError error = deserializeJson(doc, request->arg("plain"));
 
     if (error || !doc.containsKey("confirm") || doc["confirm"] != true) {
-        _server.send(400, "application/json",
+        request->send(400, "application/json",
             "{\"error\":\"Send {\\\"confirm\\\":true} to format. THIS DESTROYS ALL DATA.\"}");
         return;
     }
@@ -388,22 +467,22 @@ void BoilerWebServer::handlePostSDFormat() {
 
     String response;
     serializeJson(resp, response);
-    _server.send(ok ? 200 : 500, "application/json", response);
+    request->send(ok ? 200 : 500, "application/json", response);
 }
 
-void BoilerWebServer::handlePostTest() {
-    sendCORSHeaders();
+void BoilerWebServer::handlePostTest(AsyncWebServerRequest* request) {
+    sendCORSHeaders(request);
 
-    if (!_server.hasArg("plain")) {
-        _server.send(400, "application/json", "{\"error\":\"No body\"}");
+    if (request->arg("plain").length() == 0) {
+        request->send(400, "application/json", "{\"error\":\"No body\"}");
         return;
     }
 
     JsonDocument doc;
-    DeserializationError error = deserializeJson(doc, _server.arg("plain"));
+    DeserializationError error = deserializeJson(doc, request->arg("plain"));
 
     if (error) {
-        _server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+        request->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
         return;
     }
 
@@ -493,14 +572,14 @@ void BoilerWebServer::handlePostTest() {
     }
 
     if (updated) {
-        _server.send(200, "application/json", "{\"success\":true}");
+        request->send(200, "application/json", "{\"success\":true}");
     } else {
-        _server.send(400, "application/json", "{\"error\":\"No valid values\"}");
+        request->send(400, "application/json", "{\"error\":\"No valid values\"}");
     }
 }
 
-void BoilerWebServer::handleGetTests() {
-    sendCORSHeaders();
+void BoilerWebServer::handleGetTests(AsyncWebServerRequest* request) {
+    sendCORSHeaders(request);
 
     JsonDocument doc;
 
@@ -531,11 +610,11 @@ void BoilerWebServer::handleGetTests() {
 
     String response;
     serializeJson(doc, response);
-    _server.send(200, "application/json", response);
+    request->send(200, "application/json", response);
 }
 
-void BoilerWebServer::handleClearTests() {
-    sendCORSHeaders();
+void BoilerWebServer::handleClearTests(AsyncWebServerRequest* request) {
+    sendCORSHeaders(request);
 
     for (int i = 0; i < 5; i++) {
         _manual_tests[i].valid = false;
@@ -548,11 +627,99 @@ void BoilerWebServer::handleClearTests() {
         _fuzzy->setManualInput(FUZZY_IN_PH, 0, false);
     }
 
-    _server.send(200, "application/json", "{\"success\":true}");
+    request->send(200, "application/json", "{\"success\":true}");
 }
 
-void BoilerWebServer::handleNotFound() {
-    _server.send(404, "text/plain", "Not Found");
+void BoilerWebServer::handleNotFound(AsyncWebServerRequest* request) {
+    request->send(404, "text/plain", "Not Found");
+}
+
+void BoilerWebServer::handlePostCommand(AsyncWebServerRequest* request) {
+    sendCORSHeaders(request);
+    if (request->arg("plain").length() == 0) {
+        request->send(400, "application/json", "{\"error\":\"Body required: request_id, name, params\"}");
+        return;
+    }
+    JsonDocument doc;
+    if (deserializeJson(doc, request->arg("plain")) != DeserializationError::Ok) {
+        request->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+        return;
+    }
+    const char* request_id = doc["request_id"] | "";
+    const char* name = doc["name"] | "";
+    if (!request_id[0] || !name[0]) {
+        request->send(400, "application/json", "{\"error\":\"request_id and name required\"}");
+        return;
+    }
+    JsonObject params = doc["params"].as<JsonObject>();
+    String outMessage;
+    bool accepted = _command_handler ? _command_handler(request_id, name, params, &outMessage) : false;
+    if (accepted) {
+        JsonDocument resp;
+        resp["request_id"] = request_id;
+        resp["status"] = "accepted";
+        String s;
+        serializeJson(resp, s);
+        request->send(202, "application/json", s);
+    } else {
+        JsonDocument errDoc;
+        errDoc["error"] = outMessage.length() ? outMessage.c_str() : "Command rejected or no handler";
+        String errStr;
+        serializeJson(errDoc, errStr);
+        request->send(400, "application/json", errStr);
+    }
+}
+
+void BoilerWebServer::handlePostConfig(AsyncWebServerRequest* request) {
+    sendCORSHeaders(request);
+    if (request->arg("plain").length() == 0 || !_config) {
+        request->send(400, "application/json", "{\"error\":\"JSON body required\"}");
+        return;
+    }
+    JsonDocument doc;
+    if (deserializeJson(doc, request->arg("plain")) != DeserializationError::Ok) {
+        request->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+        return;
+    }
+    if (doc.containsKey("log_interval_ms")) {
+        uint32_t v = doc["log_interval_ms"].as<uint32_t>();
+        if (v >= 1000 && v <= 86400000) _config->log_interval_ms = v;
+    }
+    if (doc.containsKey("display_in_ppm")) _config->display_in_ppm = doc["display_in_ppm"].as<bool>();
+    // MQTT telemetry (Modern IoT Stack)
+    if (doc.containsKey("mqtt_host")) {
+        const char* s = doc["mqtt_host"].as<const char*>();
+        if (s) {
+            strncpy(_config->mqtt_host, s, MQTT_HOST_MAX_LEN - 1);
+            _config->mqtt_host[MQTT_HOST_MAX_LEN - 1] = '\0';
+        }
+    }
+    if (doc.containsKey("mqtt_port")) {
+        uint16_t p = doc["mqtt_port"].as<uint16_t>();
+        if (p > 0 && p <= 65535) _config->mqtt_port = p;
+    }
+    if (doc.containsKey("mqtt_user")) {
+        const char* s = doc["mqtt_user"].as<const char*>();
+        if (s) {
+            strncpy(_config->mqtt_user, s, MQTT_USER_MAX_LEN - 1);
+            _config->mqtt_user[MQTT_USER_MAX_LEN - 1] = '\0';
+        }
+    }
+    if (doc.containsKey("mqtt_pass")) {
+        const char* s = doc["mqtt_pass"].as<const char*>();
+        if (s) {
+            strncpy(_config->mqtt_pass, s, MQTT_PASS_MAX_LEN - 1);
+            _config->mqtt_pass[MQTT_PASS_MAX_LEN - 1] = '\0';
+        }
+    }
+    if (doc.containsKey("use_mqtt_telemetry")) _config->use_mqtt_telemetry = doc["use_mqtt_telemetry"].as<bool>();
+    saveConfiguration();
+    request->send(200, "application/json", "{\"success\":true}");
+    JsonDocument payload;
+    payload["applied"] = true;
+    String pl;
+    serializeJson(payload, pl);
+    broadcastWs("config", pl.c_str());
 }
 
 // ============================================================================
