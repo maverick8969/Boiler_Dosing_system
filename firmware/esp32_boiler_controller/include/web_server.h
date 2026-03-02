@@ -126,6 +126,13 @@ private:
     String generateJS();
 
     void sendCORSHeaders(AsyncWebServerRequest* request);
+
+    /**
+     * @brief Check authentication for state-changing POST endpoints (F1).
+     * When access_code_enabled, requires X-API-Key header or access_code in JSON body.
+     * @return true if auth disabled or credentials valid; false to respond 401.
+     */
+    bool checkPostAuth(AsyncWebServerRequest* request, const String& body);
 };
 
 extern BoilerWebServer webServer;

@@ -8,6 +8,7 @@ of the Columbia CT-6 Boiler Dosing Controller.
 | Program | Description | Dependencies |
 |---------|-------------|--------------|
 | `test_stepper_pumps.cpp` | A4988 drivers, motor operation, calibration | AccelStepper |
+| `test_dosing_pump.cpp` | Single dosing pump + water meter + LCD + encoder with per-gallon / per-day dosing menu | LiquidCrystal_I2C, AccelStepper, encoder |
 | `test_conductivity_sensor.cpp` | Conductivity probe, Pt1000 RTD, calibration | - |
 | `test_water_meter.cpp` | Pulse counting, flow rate, totalizer | - |
 | `test_lcd_display.cpp` | I2C LCD, custom characters, screen layouts | LiquidCrystal_I2C |
@@ -74,6 +75,7 @@ pio run -e test_stepper_pumps -t upload -t monitor
 
 ```ini
 [env:test_stepper_pumps]      # Stepper motor/pump test
+[env:test_dosing_pump]        # Dosing pump + water meter + LCD + encoder
 [env:test_conductivity_sensor] # Conductivity sensor test
 [env:test_water_meter]         # Water meter pulse test
 [env:test_lcd_display]         # LCD display test
@@ -108,6 +110,44 @@ Tests the three chemical dosing pumps (H2SO3, NaOH, Amine):
 - Forward and reverse operation
 - Speed adjustment
 - Calibration mode (ml per revolution)
+
+### test_dosing_pump.cpp
+
+Standalone dosing test with one stepper-driven chemical pump, the makeup water meter,
+LCD, and rotary encoder:
+
+- Uses canonical pins from `pin_definitions.h`:
+  - **Dosing pump (Stepper 1 / H2SO3)**:
+    - STEP: `STEPPER1_STEP_PIN` (GPIO12, X.STEP on CNC shield)
+    - DIR: `STEPPER1_DIR_PIN` (GPIO14, X.DIR)
+    - ENABLE (shared): `STEPPER_ENABLE_PIN` (GPIO13, common A4988 enable, active LOW)
+  - **Water meter input**:
+    - `WATER_METER_PIN` (GPIO34, input-only, 1 pulse = 1 gallon)
+    - Debounce and pulses-per-gallon from `WATER_METER_DEBOUNCE_MS` / `WATER_METER_PULSES_PER_GAL`
+  - **LCD (20x4 I2C)**:
+    - Address: `LCD_I2C_ADDR` (default 0x27)
+    - SDA/SCL: `I2C_SDA_PIN` (GPIO21), `I2C_SCL_PIN` (GPIO22)
+  - **Rotary encoder**:
+    - A/B/button: `ENCODER_PIN_A` (GPIO15), `ENCODER_PIN_B` (GPIO2), `ENCODER_BUTTON_PIN` (GPIO4 on main MCU)
+
+Features:
+
+- Dosing modes:
+  - **Per gallon**: fixed cups of chemical per gallon (default 1 cup / 50 gal)
+  - **Per day (average)**: target cups per day; computes effective cups/gal from gallons seen today,
+    but never doses below the base per-gallon setting
+- Two ways to increase chemical:
+  - Increase **Dose/Gal** (higher concentration)
+  - Increase **Target cups/day** so the system raises effective Dose/Gal with higher water usage
+- LCD status screen shows mode, effective Dose/Gal, gallons today, and cups dispensed
+- Encoder menu items:
+  - `Mode` (PER_GAL / PER_DAY)
+  - `Dose/gal` (cups/gal)
+  - `Target/day` (cups/day)
+  - `Pump prime` (fixed small volume)
+  - `Reset totals` (clear today's gallons/cups)
+- Serial debug at 115200 baud:
+  - `p` = status, `d` = daily usage summary, `z` = reset totals, `s` = emergency stop, `h`/`?` = help
 
 ### test_conductivity_sensor.cpp
 
@@ -229,7 +269,7 @@ Slow step (`1`/`2`/`3`) while adjusting pot -> Verify with stall test (`4`/`5`/`
 ### test_blowdown_valve.cpp
 
 Tests the Assured Automation E26NRXS4UV-EP420C blowdown ball valve:
-- SPDT relay control on GPIO4 (4mA closed / 20mA open via resistor select)
+- SPDT relay control on GPIO4 (4mA closed / 20mA open via resistor select) on panel/coprocessor ESP32
 - ADS1115 16-bit ADC reads 4-20mA position feedback (150 ohm sense resistor)
 - Open/close with real-time feedback tracking and position confirmation
 - Full cycle test with automatic timing measurement

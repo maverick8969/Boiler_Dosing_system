@@ -3,7 +3,8 @@
  * @brief Blowdown Valve Control Implementation
  *
  * Controls Assured Automation E26NRXS4UV-EP420C:
- * - SPDT relay on GPIO4 selects 4mA (closed) or 20mA (open) resistor
+ * - Legacy single-ESP32 design: SPDT relay on GPIO4 selects 4mA (closed) or 20mA (open)
+ * - Current 2-DevKit design: valve relay is driven by the panel/coprocessor ESP32 via RS-485
  * - ADS1115 reads 4-20mA position feedback via 150 ohm sense resistor
  */
 
@@ -47,11 +48,13 @@ BlowdownController::BlowdownController(uint8_t relay_pin)
 }
 
 bool BlowdownController::begin() {
-    // Configure relay output (drives SPDT relay via MOSFET)
+    // Configure relay output (drives SPDT relay via MOSFET) when present.
     // LOW = relay de-energized = NC = R_close (3.3k) = ~4mA = valve CLOSED
     // HIGH = relay energized = NO = R_open (680) = ~20mA = valve OPEN
-    pinMode(_relay_pin, OUTPUT);
-    digitalWrite(_relay_pin, LOW);  // Start with valve closed (4mA)
+    if (_relay_pin >= 0) {
+        pinMode(_relay_pin, OUTPUT);
+        digitalWrite(_relay_pin, LOW);  // Start with valve closed (4mA)
+    }
 
     // Check for ADS1115 on I2C bus for position feedback
     Wire.beginTransmission(ADS1115_I2C_ADDR);
@@ -64,8 +67,10 @@ bool BlowdownController::begin() {
         Serial.println("Blowdown: ADS1115 not found - feedback disabled");
     }
 
-    Serial.printf("Blowdown controller initialized on GPIO%d "
-                   "(4-20mA relay-switched control)\n", _relay_pin);
+    Serial.printf("Blowdown controller initialized on %s "
+                   "(4-20mA relay-switched control)\n",
+                  _relay_pin >= 0 ? String("GPIO" + String(_relay_pin)).c_str()
+                                  : "remote valve (coprocessor)");
     return true;
 }
 
@@ -457,9 +462,11 @@ void BlowdownController::processTimeProportional(float conductivity) {
 
 void BlowdownController::setRelayState(bool energize) {
     _status.relay_energized = energize;
-    // GPIO HIGH = relay energized = NO contact = R_open (680 ohm) = ~20mA = OPEN
-    // GPIO LOW  = relay de-energized = NC contact = R_close (3.3k) = ~4mA = CLOSED
-    digitalWrite(_relay_pin, energize ? HIGH : LOW);
+    if (_relay_pin >= 0) {
+        // GPIO HIGH = relay energized = NO contact = R_open (680 ohm) = ~20mA = OPEN
+        // GPIO LOW  = relay de-energized = NC contact = R_close (3.3k) = ~4mA = CLOSED
+        digitalWrite(_relay_pin, energize ? HIGH : LOW);
+    }
 }
 
 void BlowdownController::startBallValve(bool opening) {

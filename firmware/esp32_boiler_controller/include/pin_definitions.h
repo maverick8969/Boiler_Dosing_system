@@ -112,7 +112,14 @@
 // Feedback: Actuator outputs 4-20mA position signal read via ADS1115 external
 //           ADC (I2C). 150 ohm sense resistor converts to 0.6-3.0V.
 
+#ifdef USE_COPROCESSOR_LINK
+// When using the coprocessor link, the main MCU does not drive a local blowdown relay.
+// Keep the symbolic define for compatibility, but mark as unused on the main MCU.
+#define BLOWDOWN_RELAY_PIN      (-1)
+#else
+// Legacy single-ESP32 design: local relay on GPIO4.
 #define BLOWDOWN_RELAY_PIN      GPIO_NUM_4    // SPDT relay coil (via MOSFET)
+#endif
 
 // 4-20mA Position Feedback via ADS1115 (I2C external ADC)
 #define BLOWDOWN_FEEDBACK_ADS_CH    0         // ADS1115 channel 0 for feedback
@@ -189,7 +196,7 @@
 
 #define ENCODER_PIN_A           GPIO_NUM_15   // CLK - Encoder output A
 #define ENCODER_PIN_B           GPIO_NUM_2    // DT  - Encoder output B
-#define ENCODER_BUTTON_PIN      GPIO_NUM_0    // SW  - Push button (active LOW, select/menu)
+#define ENCODER_BUTTON_PIN      GPIO_NUM_4    // SW  - Push button (active LOW, select/menu) on main MCU
 
 // Encoder Configuration
 #define ENCODER_STEPS_PER_NOTCH 4             // Pulses per detent (typical for KY-040)
@@ -244,7 +251,7 @@
 // Pins that should NOT be used (reserved or strapping pins)
 // GPIO6-11: Connected to integrated SPI flash (DO NOT USE)
 // GPIO34-39: Input only (no internal pull-up/down)
-// GPIO0: Boot button (use with care)
+// GPIO0: Boot button (reserved / not used for encoder on main MCU)
 // GPIO2: Must be LOW during boot for serial flashing
 
 // Safe output pins: 4, 5, 13, 14, 16, 17, 18, 19, 21, 22, 23, 25, 26, 27, 32, 33
@@ -258,31 +265,31 @@
 /*
 | GPIO | Function              | Direction | Notes                              |
 |------|-----------------------|-----------|------------------------------------|
-| 0    | ENCODER_BUTTON (sel)  | Input     | Select/menu (strapping! 10k pull-up)|
-| 2    | ENCODER_PIN_B (DT)    | Input     | Encoder output B (strapping)        |
-| 4    | BLOWDOWN_RELAY        | Output    | SPDT relay for 4-20mA control       |
-| 5    | WS2812_DATA           | Output    | LED strip                           |
-| 12   | STEPPER1_STEP         | Output    | H2SO3 pump step (10k pull-down!)    |
-| 13   | STEPPER_ENABLE        | Output    | Common enable (active LOW)          |
-| 14   | STEPPER1_DIR          | Output    | H2SO3 pump direction                |
-| 15   | ENCODER_PIN_A (CLK)   | Input     | Encoder output A (strapping)        |
-| 16   | MAX31865_CS           | Output    | RTD SPI chip select                 |
+| 0    | BOOT (unused)         | Input     | ESP32 boot button / strapping pin  |
+| 2    | ENCODER_PIN_B (DT)    | Input     | Encoder output B (strapping)       |
+| 4    | ENCODER_BUTTON (sel)  | Input     | Select/menu button on main MCU     |
+| 5    | WS2812_DATA           | Output    | LED strip                          |
+| 12   | STEPPER1_STEP         | Output    | H2SO3 pump step (10k pull-down!)   |
+| 13   | STEPPER_ENABLE        | Output    | Common enable (active LOW)         |
+| 14   | STEPPER1_DIR          | Output    | H2SO3 pump direction               |
+| 15   | ENCODER_PIN_A (CLK)   | Input     | Encoder output A (strapping)       |
+| 16   | MAX31865_CS           | Output    | RTD SPI chip select                |
 | 17   | AUX_INPUT1 / WM2      | Input     | Drum level switch or Water Meter 2 (use one) |
-| 18   | VSPI_SCK              | Output    | Shared SPI clock (MAX31865 + SD)    |
-| 19   | SD_CS                 | Output    | SD card chip select (VSPI)          |
-| 21   | I2C_SDA               | I/O       | LCD + ADS1115                       |
-| 22   | I2C_SCL               | Output    | LCD + ADS1115                       |
-| 23   | VSPI_MOSI             | Output    | Shared SPI data out (MAX31865 + SD) |
-| 25   | EZO_EC_TX             | Output    | Atlas EZO-EC UART TX                |
-| 26   | STEPPER2_DIR          | Output    | NaOH pump direction                 |
-| 27   | STEPPER2_STEP         | Output    | NaOH pump step                      |
-| 32   | STEPPER3_DIR          | Output    | Amine pump direction                |
-| 33   | STEPPER3_STEP         | Output    | Amine pump step                     |
-| 34   | WATER_METER           | Input     | Water meter pulses (input-only)     |
-| 35   | FEEDWATER_PUMP_MON    | Input     | Pump contactor via optocoupler      |
-| 36   | EZO_EC_RX             | Input     | Atlas EZO-EC UART RX (input-only)   |
-| 39   | MAX31865_MISO         | Input     | RTD SPI data in (input-only)        |
-| I2C  | ADS1115 CH0           | Input     | Blowdown valve 4-20mA feedback      |
+| 18   | VSPI_SCK              | Output    | Shared SPI clock (MAX31865 + SD)   |
+| 19   | SD_CS                 | Output    | SD card chip select (VSPI)         |
+| 21   | I2C_SDA               | I/O       | LCD + ADS1115                      |
+| 22   | I2C_SCL               | Output    | LCD + ADS1115                      |
+| 23   | VSPI_MOSI             | Output    | Shared SPI data out (MAX31865 + SD)|
+| 25   | EZO_EC_TX             | Output    | Atlas EZO-EC UART TX               |
+| 26   | STEPPER2_DIR          | Output    | NaOH pump direction                |
+| 27   | STEPPER2_STEP         | Output    | NaOH pump step                     |
+| 32   | STEPPER3_DIR          | Output    | Amine pump direction               |
+| 33   | STEPPER3_STEP         | Output    | Amine pump step                    |
+| 34   | WATER_METER           | Input     | Water meter pulses (input-only)    |
+| 35   | FEEDWATER_PUMP_MON    | Input     | Pump contactor via optocoupler     |
+| 36   | EZO_EC_RX             | Input     | Atlas EZO-EC UART RX (input-only)  |
+| 39   | MAX31865_MISO         | Input     | RTD SPI data in (input-only)       |
+| I2C  | ADS1115 CH0           | Input     | Blowdown valve 4-20mA feedback     |
 */
 
 #endif // PIN_DEFINITIONS_H

@@ -492,7 +492,7 @@ function startMqttGateway() {
             deviceId,
             doc.uptime_sec ?? null,
             doc.free_heap ?? null,
-            doc.active_alarms ? 1 : 0,
+            doc.active_alarms ?? 0,
           ]
         );
       }

@@ -35,10 +35,12 @@
 #include "mqtt_telemetry.h"
 #include "fuzzy_logic.h"
 #include "device_manager.h"
+#include "encoder.h"
 #include "self_test.h"
 #include "sensor_health.h"
 #include <esp_task_wdt.h>
 
+#include "coprocessor_protocol.h"  // cp_crc16 for config checksum (F5)
 #ifdef USE_COPROCESSOR_LINK
 #include "coprocessor_link.h"
 #endif
@@ -154,8 +156,15 @@ void setup() {
     // Initialize shared VSPI bus (MAX31865 + SD card)
     SPI.begin(MAX31865_SCK_PIN, MAX31865_MISO_PIN, MAX31865_MOSI_PIN);
     spiMutex = xSemaphoreCreateMutex();
+    if (spiMutex == NULL) {
+        Serial.println("FATAL: SPI mutex creation failed (heap exhausted?)");
+        display.showAlarm("INIT FAIL");
+        for (;;) { delay(1000); }
+    }
+#if defined(DEBUG_MODE) || (CORE_DEBUG_LEVEL >= 3)
     Serial.printf("VSPI bus: SCK=%d, MISO=%d, MOSI=%d (shared: MAX31865 + SD)\n",
                   MAX31865_SCK_PIN, MAX31865_MISO_PIN, MAX31865_MOSI_PIN);
+#endif
 
     // Load configuration from NVS
     loadConfiguration();
@@ -247,9 +256,11 @@ void setup() {
     // Web server (accessible via AP hotspot at 192.168.4.1 and via STA IP)
     if (webServer.begin(&systemConfig, &fuzzyController)) {
         webServer.setCommandHandler(handleApiCommand);
+#if defined(DEBUG_MODE) || (CORE_DEBUG_LEVEL >= 3)
         Serial.printf("Web UI: http://%s/ (AP) or http://%s/ (STA)\n",
                       WiFi.softAPIP().toString().c_str(),
                       WiFi.localIP().toString().c_str());
+#endif
         display.showMessage("Web UI Active", WiFi.softAPIP().toString().c_str());
         delay(500);
     }
@@ -292,50 +303,60 @@ void setup() {
     // Note: AUX_INPUT2 (GPIO18) repurposed for MAX31865 SCK
 
     // Rotary encoder pins are initialized by the encoder module's begin().
-    // The encoder push button (GPIO0) is the sole physical button (select/menu).
+    // The encoder push button (ENCODER_BUTTON_PIN, GPIO4 on main MCU) is the sole
+    // physical button (select/menu).
 
-    // Create FreeRTOS tasks
+    // Create FreeRTOS tasks (F3: check returns to avoid NULL deref / missing control task)
     Serial.println("Creating tasks...");
 
-    xTaskCreatePinnedToCore(
-        taskControlLoop,
-        "Control",
-        TASK_STACK_CONTROL,
-        NULL,
-        TASK_PRIORITY_CONTROL,
-        &taskControl,
-        1  // Core 1
-    );
-
-    xTaskCreatePinnedToCore(
-        taskMeasurementLoop,
-        "Measurement",
-        TASK_STACK_MEASUREMENT,
-        NULL,
-        TASK_PRIORITY_MEASUREMENT,
-        &taskMeasurement,
-        1  // Core 1
-    );
-
-    xTaskCreatePinnedToCore(
-        taskDisplayLoop,
-        "Display",
-        TASK_STACK_DISPLAY,
-        NULL,
-        TASK_PRIORITY_DISPLAY,
-        &taskDisplay,
-        0  // Core 0
-    );
-
-    xTaskCreatePinnedToCore(
-        taskLoggingLoop,
-        "Logging",
-        TASK_STACK_LOGGING,
-        NULL,
-        TASK_PRIORITY_LOGGING,
-        &taskLogging,
-        0  // Core 0
-    );
+    if (xTaskCreatePinnedToCore(
+            taskControlLoop,
+            "Control",
+            TASK_STACK_CONTROL,
+            NULL,
+            TASK_PRIORITY_CONTROL,
+            &taskControl,
+            1) != pdPASS) {
+        Serial.println("FATAL: Control task creation failed");
+        display.showAlarm("INIT FAIL");
+        for (;;) { delay(1000); }
+    }
+    if (xTaskCreatePinnedToCore(
+            taskMeasurementLoop,
+            "Measurement",
+            TASK_STACK_MEASUREMENT,
+            NULL,
+            TASK_PRIORITY_MEASUREMENT,
+            &taskMeasurement,
+            1) != pdPASS) {
+        Serial.println("FATAL: Measurement task creation failed");
+        display.showAlarm("INIT FAIL");
+        for (;;) { delay(1000); }
+    }
+    if (xTaskCreatePinnedToCore(
+            taskDisplayLoop,
+            "Display",
+            TASK_STACK_DISPLAY,
+            NULL,
+            TASK_PRIORITY_DISPLAY,
+            &taskDisplay,
+            0) != pdPASS) {
+        Serial.println("FATAL: Display task creation failed");
+        display.showAlarm("INIT FAIL");
+        for (;;) { delay(1000); }
+    }
+    if (xTaskCreatePinnedToCore(
+            taskLoggingLoop,
+            "Logging",
+            TASK_STACK_LOGGING,
+            NULL,
+            TASK_PRIORITY_LOGGING,
+            &taskLogging,
+            0) != pdPASS) {
+        Serial.println("FATAL: Logging task creation failed");
+        display.showAlarm("INIT FAIL");
+        for (;;) { delay(1000); }
+    }
 
     // Initialization complete
     Serial.println("Initialization complete!");
@@ -353,6 +374,9 @@ void loop() {
     // Handle any non-time-critical operations here
 
     esp_task_wdt_reset();  // Feed the hardware watchdog
+
+    // Feed encoder ISR-safe tick (F4) so button debounce works even if update() not called
+    encoder.setTickMs(millis());
 
     // Check for button presses
     processInputs();
@@ -740,9 +764,19 @@ void loadConfiguration() {
         if (systemConfig.magic != CONFIG_MAGIC) {
             Serial.println("Invalid config magic - initializing defaults");
             initializeDefaults();
-        } else {
-            Serial.println("Configuration loaded successfully");
+            return;
         }
+        // F5: Verify CRC16 to detect NVS corruption
+        uint16_t stored_checksum = systemConfig.checksum;
+        systemConfig.checksum = 0;
+        uint16_t computed = cp_crc16((const uint8_t*)&systemConfig, sizeof(system_config_t));
+        systemConfig.checksum = stored_checksum;
+        if (computed != stored_checksum) {
+            Serial.println("Config checksum mismatch - initializing defaults");
+            initializeDefaults();
+            return;
+        }
+        Serial.println("Configuration loaded successfully");
         return;
     }
 
@@ -770,17 +804,28 @@ void loadConfiguration() {
     if (systemConfig.magic != CONFIG_MAGIC) {
         Serial.println("Invalid config magic - initializing defaults");
         initializeDefaults();
-    } else {
-        Serial.println("Configuration loaded successfully (truncated from larger blob)");
+        return;
     }
+    uint16_t stored_checksum = systemConfig.checksum;
+    systemConfig.checksum = 0;
+    uint16_t computed = cp_crc16((const uint8_t*)&systemConfig, sizeof(system_config_t));
+    systemConfig.checksum = stored_checksum;
+    if (computed != stored_checksum) {
+        Serial.println("Config checksum mismatch (larger blob) - initializing defaults");
+        initializeDefaults();
+        return;
+    }
+    Serial.println("Configuration loaded successfully (truncated from larger blob)");
 }
 
 void saveConfiguration() {
     Serial.println("Saving configuration to NVS...");
 
-    // Update checksum
     systemConfig.magic = CONFIG_MAGIC;
     systemConfig.version = CONFIG_VERSION;
+    // F5: CRC16 over entire config (checksum field zeroed during computation)
+    systemConfig.checksum = 0;
+    systemConfig.checksum = cp_crc16((const uint8_t*)&systemConfig, sizeof(system_config_t));
 
     preferences.begin(NVS_NAMESPACE, false);  // Read-write
     preferences.putBytes(NVS_KEY_CONFIG, &systemConfig, sizeof(system_config_t));
@@ -1127,7 +1172,7 @@ void processInputs() {
     // For now, stub: display.nextScreen() / display.prevScreen()
     // will be driven by the encoder callback.
 
-    // --- Encoder push button (GPIO0, active LOW) ---
+    // --- Encoder push button (ENCODER_BUTTON_PIN, active LOW) ---
     bool btn = digitalRead(ENCODER_BUTTON_PIN);
 
     // Debounce

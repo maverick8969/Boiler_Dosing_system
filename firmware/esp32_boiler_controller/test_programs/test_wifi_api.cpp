@@ -217,6 +217,11 @@ void disconnectWiFi() {
 void startAPMode() {
     Serial.println();
     Serial.printf("Starting AP mode: %s\n", AP_SSID);
+#if defined(DEBUG_MODE) || defined(TEST_WIFI_VERBOSE)
+    Serial.printf("  Password: %s\n", AP_PASS);
+#else
+    Serial.println("  Password: (omit in production logs)");
+#endif
 
     WiFi.mode(WIFI_AP);
     WiFi.softAP(AP_SSID, AP_PASS);
@@ -226,7 +231,6 @@ void startAPMode() {
 
     Serial.println("AP started!");
     Serial.printf("  SSID: %s\n", AP_SSID);
-    Serial.printf("  Password: %s\n", AP_PASS);
     Serial.printf("  IP: %s\n", WiFi.softAPIP().toString().c_str());
 
     startLocalServer();

@@ -139,6 +139,12 @@ public:
     void clearLimits();
 
     /**
+     * @brief Feed tick for ISR-safe time (F4). Call from loop/task e.g. setTickMs(millis()).
+     * Used by button debounce in ISR to avoid millis() in interrupt context.
+     */
+    void setTickMs(uint32_t ms);
+
+    /**
      * @brief ISR handler for encoder rotation (called from ISR)
      */
     static void IRAM_ATTR handleEncoderISR(void* arg);

@@ -9,6 +9,9 @@
 RotaryEncoder encoder;
 MenuNavigator menuNav(&encoder);
 
+// ISR-safe tick (written by task, read by ISR) — F4: avoid millis() in ISR
+static volatile uint32_t s_encoder_tick_ms = 0;
+
 // State table for quadrature decoding
 // Indexed by (old_state << 2) | new_state
 // Values: 0 = no change, 1 = CW, -1 = CCW
@@ -81,13 +84,25 @@ bool RotaryEncoder::begin() {
 }
 
 void RotaryEncoder::update() {
+    // Feed ISR-safe tick for button debounce (F4)
+    setTickMs(millis());
+
     // Process button state
     processButton();
 
-    // Process events and call callback
+    // Process events and call callback; apply acceleration here (F4: not in ISR)
     if (_callback) {
         encoder_event_t event;
         while ((event = getEvent()) != ENC_EVENT_NONE) {
+            if (event == ENC_EVENT_CW || event == ENC_EVENT_CCW) {
+                uint32_t now = millis();
+                int8_t step = 1;
+                if (_acceleration_enabled && (now - _last_rotation_time) < _accel_threshold)
+                    step = _accel_multiplier;
+                _last_rotation_time = now;
+                int8_t dir = (event == ENC_EVENT_CW) ? 1 : -1;
+                _position += (step - 1) * dir;
+            }
             _callback(event, _position);
         }
     }
@@ -160,6 +175,10 @@ void RotaryEncoder::clearLimits() {
     _limits_enabled = false;
 }
 
+void RotaryEncoder::setTickMs(uint32_t ms) {
+    s_encoder_tick_ms = ms;
+}
+
 void IRAM_ATTR RotaryEncoder::handleEncoderISR(void* arg) {
     RotaryEncoder* enc = (RotaryEncoder*)arg;
 
@@ -171,17 +190,8 @@ void IRAM_ATTR RotaryEncoder::handleEncoderISR(void* arg) {
     int8_t delta = ENCODER_STATE_TABLE[index];
 
     if (delta != 0) {
-        uint32_t now = millis();
-        uint32_t time_diff = now - enc->_last_rotation_time;
-
-        // Apply acceleration
-        int8_t step = 1;
-        if (enc->_acceleration_enabled && time_diff < enc->_accel_threshold) {
-            step = enc->_accel_multiplier;
-        }
-
-        enc->_position += delta * step;
-        enc->_last_rotation_time = now;
+        // F4: No millis() in ISR — apply step 1 only; acceleration applied in update()
+        enc->_position += delta;
 
         // Queue event (every STEPS_PER_NOTCH pulses)
         static int8_t pulse_count = 0;
@@ -207,9 +217,9 @@ void IRAM_ATTR RotaryEncoder::handleEncoderISR(void* arg) {
 void IRAM_ATTR RotaryEncoder::handleButtonISR(void* arg) {
     RotaryEncoder* enc = (RotaryEncoder*)arg;
 
-    // Debounce
+    // Debounce using ISR-safe tick (F4: no millis() in ISR)
     static uint32_t last_interrupt = 0;
-    uint32_t now = millis();
+    uint32_t now = s_encoder_tick_ms;
     if (now - last_interrupt < ENCODER_BTN_DEBOUNCE_MS) return;
     last_interrupt = now;
 

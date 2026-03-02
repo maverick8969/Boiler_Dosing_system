@@ -57,11 +57,13 @@ bool BoilerWebServer::begin(system_config_t* config, FuzzyController* fuzzy) {
     _server.begin();
     _running = true;
 
+#if defined(DEBUG_MODE) || (CORE_DEBUG_LEVEL >= 3)
     Serial.printf("Web server started on port %d (Async + WebSocket %s)\n", WEB_SERVER_PORT, WEB_WS_PATH);
     Serial.printf("  AP:  http://%s/\n", WiFi.softAPIP().toString().c_str());
     if (WiFi.status() == WL_CONNECTED) {
         Serial.printf("  STA: http://%s/\n", WiFi.localIP().toString().c_str());
     }
+#endif
 
     return true;
 }
@@ -137,8 +139,8 @@ void BoilerWebServer::onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* cl
 
 void BoilerWebServer::stop() {
     _ws.closeAll();
-    _server.end();
     _running = false;
+    // Note: AsyncWebServer has no safe end(); keep server running or reboot to fully stop.
 }
 
 void BoilerWebServer::setTestInputCallback(void (*callback)(fuzzy_input_t, float, bool)) {
@@ -208,7 +210,32 @@ void BoilerWebServer::applyEstimatedPhIfNeeded() {
 void BoilerWebServer::sendCORSHeaders(AsyncWebServerRequest* request) {
     request->addHeader("Access-Control-Allow-Origin", "*");
     request->addHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
-    request->addHeader("Access-Control-Allow-Headers", "Content-Type");
+    request->addHeader("Access-Control-Allow-Headers", "Content-Type, X-API-Key, X-Access-Code");
+}
+
+bool BoilerWebServer::checkPostAuth(AsyncWebServerRequest* request, const String& body) {
+    if (!_config) return true;
+    if (!_config->access_code_enabled) return true;
+
+    // Accept X-API-Key header if config has an API key set
+    if (request->hasHeader("X-API-Key")) {
+        AsyncWebHeader* h = request->getHeader("X-API-Key");
+        if (h && strlen(_config->api_key) > 0) {
+            const String v = h->value();
+            if (v.equals(_config->api_key)) return true;
+        }
+    }
+
+    // Accept access_code in JSON body (for form or JSON clients)
+    if (body.length() > 0) {
+        JsonDocument doc;
+        if (deserializeJson(doc, body) == DeserializationError::Ok && doc.containsKey("access_code")) {
+            uint32_t code = doc["access_code"].as<uint32_t>();
+            if (code == (uint32_t)_config->access_code) return true;
+        }
+    }
+
+    return false;
 }
 
 // ============================================================================
@@ -433,15 +460,21 @@ void BoilerWebServer::handleGetSDStatus(AsyncWebServerRequest* request) {
 void BoilerWebServer::handlePostSDFormat(AsyncWebServerRequest* request) {
     sendCORSHeaders(request);
 
+    String body = request->arg("plain");
+    if (!checkPostAuth(request, body)) {
+        request->send(401, "application/json", "{\"error\":\"Authentication required\"}");
+        return;
+    }
+
     // Require explicit confirmation to prevent accidental data loss
-    if (request->arg("plain").length() == 0) {
+    if (body.length() == 0) {
         request->send(400, "application/json",
             "{\"error\":\"POST body required with {\\\"confirm\\\":true}\"}");
         return;
     }
 
     JsonDocument doc;
-    DeserializationError error = deserializeJson(doc, request->arg("plain"));
+    DeserializationError error = deserializeJson(doc, body);
 
     if (error || !doc.containsKey("confirm") || doc["confirm"] != true) {
         request->send(400, "application/json",
@@ -449,7 +482,9 @@ void BoilerWebServer::handlePostSDFormat(AsyncWebServerRequest* request) {
         return;
     }
 
+#if defined(DEBUG_MODE) || (CORE_DEBUG_LEVEL >= 3)
     Serial.println("Web API: SD card format requested");
+#endif
 
     bool ok = sdLogger.formatCard();
 
@@ -473,13 +508,18 @@ void BoilerWebServer::handlePostSDFormat(AsyncWebServerRequest* request) {
 void BoilerWebServer::handlePostTest(AsyncWebServerRequest* request) {
     sendCORSHeaders(request);
 
-    if (request->arg("plain").length() == 0) {
+    String body = request->arg("plain");
+    if (!checkPostAuth(request, body)) {
+        request->send(401, "application/json", "{\"error\":\"Authentication required\"}");
+        return;
+    }
+    if (body.length() == 0) {
         request->send(400, "application/json", "{\"error\":\"No body\"}");
         return;
     }
 
     JsonDocument doc;
-    DeserializationError error = deserializeJson(doc, request->arg("plain"));
+    DeserializationError error = deserializeJson(doc, body);
 
     if (error) {
         request->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
@@ -636,12 +676,18 @@ void BoilerWebServer::handleNotFound(AsyncWebServerRequest* request) {
 
 void BoilerWebServer::handlePostCommand(AsyncWebServerRequest* request) {
     sendCORSHeaders(request);
-    if (request->arg("plain").length() == 0) {
+
+    String body = request->arg("plain");
+    if (!checkPostAuth(request, body)) {
+        request->send(401, "application/json", "{\"error\":\"Authentication required\"}");
+        return;
+    }
+    if (body.length() == 0) {
         request->send(400, "application/json", "{\"error\":\"Body required: request_id, name, params\"}");
         return;
     }
     JsonDocument doc;
-    if (deserializeJson(doc, request->arg("plain")) != DeserializationError::Ok) {
+    if (deserializeJson(doc, body) != DeserializationError::Ok) {
         request->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
         return;
     }
@@ -672,12 +718,18 @@ void BoilerWebServer::handlePostCommand(AsyncWebServerRequest* request) {
 
 void BoilerWebServer::handlePostConfig(AsyncWebServerRequest* request) {
     sendCORSHeaders(request);
-    if (request->arg("plain").length() == 0 || !_config) {
+
+    String body = request->arg("plain");
+    if (!checkPostAuth(request, body)) {
+        request->send(401, "application/json", "{\"error\":\"Authentication required\"}");
+        return;
+    }
+    if (body.length() == 0 || !_config) {
         request->send(400, "application/json", "{\"error\":\"JSON body required\"}");
         return;
     }
     JsonDocument doc;
-    if (deserializeJson(doc, request->arg("plain")) != DeserializationError::Ok) {
+    if (deserializeJson(doc, body) != DeserializationError::Ok) {
         request->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
         return;
     }

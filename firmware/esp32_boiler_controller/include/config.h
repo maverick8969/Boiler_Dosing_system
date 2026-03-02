@@ -40,7 +40,8 @@
 #define WIFI_RECONNECT_DELAY_MS 5000
 #define WIFI_HOSTNAME           "boiler-controller"
 
-// Default AP mode credentials (for initial setup)
+// Default AP mode credentials (for initial setup).
+// F6: Change WIFI_AP_PASS on first use; avoid leaving default in production.
 #define WIFI_AP_SSID            "BoilerController-Setup"
 #define WIFI_AP_PASS            "boiler2024"
 #define WIFI_AP_CHANNEL         1
