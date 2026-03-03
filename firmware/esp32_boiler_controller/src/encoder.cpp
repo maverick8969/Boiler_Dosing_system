@@ -46,6 +46,8 @@ RotaryEncoder::RotaryEncoder(uint8_t pin_a, uint8_t pin_b, uint8_t pin_btn)
     , _last_position(0)
     , _last_state(0)
     , _last_rotation_time(0)
+    , _last_delta_time(0)
+    , _pulse_count(0)
     , _button_pressed(false)
     , _button_press_time(0)
     , _button_release_time(0)
@@ -130,6 +132,7 @@ void RotaryEncoder::setPosition(int32_t pos) {
     noInterrupts();
     _position = pos;
     _last_position = pos;
+    _pulse_count = 0;
     interrupts();
     applyLimits();
 }
@@ -185,29 +188,32 @@ void IRAM_ATTR RotaryEncoder::handleEncoderISR(void* arg) {
     // Read current state
     uint8_t state = (digitalRead(enc->_pin_a) << 1) | digitalRead(enc->_pin_b);
 
-    // Use state table to determine direction
+    // Use state table to determine direction for this quadrature edge
     uint8_t index = (enc->_last_state << 2) | state;
     int8_t delta = ENCODER_STATE_TABLE[index];
 
     if (delta != 0) {
-        // F4: No millis() in ISR — apply step 1 only; acceleration applied in update()
-        enc->_position += delta;
+        // Accumulate raw quadrature transitions toward a full detent.
+        enc->_pulse_count += delta;
 
-        // Queue event (every STEPS_PER_NOTCH pulses)
-        static int8_t pulse_count = 0;
-        pulse_count += delta;
+        // When we've accumulated ENCODER_STEPS_PER_NOTCH pulses in one direction, treat
+        // that as a single physical detent and update both the logical position and
+        // the high-level CW/CCW event queue.
+        if (abs(enc->_pulse_count) >= ENCODER_STEPS_PER_NOTCH) {
+            // Preserve previous direction semantics for _position: one detent step is
+            // equivalent to the sign of the old net (-sum(delta)) across the detent.
+            int8_t detent_dir = (enc->_pulse_count > 0) ? -1 : 1;
+            enc->_position += detent_dir;
 
-        if (abs(pulse_count) >= ENCODER_STEPS_PER_NOTCH / 4) {
-            encoder_event_t event = (pulse_count > 0) ? ENC_EVENT_CW : ENC_EVENT_CCW;
+            encoder_event_t event = (enc->_pulse_count > 0) ? ENC_EVENT_CCW : ENC_EVENT_CW;
 
-            // Queue the event
             int next_head = (enc->_queue_head + 1) % QUEUE_SIZE;
             if (next_head != enc->_queue_tail) {
                 enc->_event_queue[enc->_queue_head] = event;
                 enc->_queue_head = next_head;
             }
 
-            pulse_count = 0;
+            enc->_pulse_count = 0;
         }
     }
 
@@ -342,19 +348,19 @@ void MenuNavigator::setSelectedIndex(int index) {
     }
 }
 
-bool MenuNavigator::update() {
+bool MenuNavigator::update(bool process_rotation) {
     _enter_pressed = false;
     _back_pressed = false;
     _home_pressed = false;
 
     bool changed = false;
 
-    // Process encoder events
+    // Process encoder events (always consume to drain queue; only update selection when process_rotation)
     encoder_event_t event;
     while ((event = _encoder->getEvent()) != ENC_EVENT_NONE) {
         switch (event) {
             case ENC_EVENT_CW:
-                if (!_editing) {
+                if (process_rotation && !_editing) {
                     _selected++;
                     if (_selected >= _item_count) {
                         _selected = _wrap ? 0 : _item_count - 1;
@@ -364,7 +370,7 @@ bool MenuNavigator::update() {
                 break;
 
             case ENC_EVENT_CCW:
-                if (!_editing) {
+                if (process_rotation && !_editing) {
                     _selected--;
                     if (_selected < 0) {
                         _selected = _wrap ? _item_count - 1 : 0;

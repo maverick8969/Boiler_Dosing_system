@@ -64,9 +64,9 @@
 // ============================================================================
 // 1 pulse per gallon contact closure input
 
-#define WATER_METER_PIN         GPIO_NUM_34   // Input only GPIO, interrupt capable (WM1)
-#define WATER_METER_2_PIN       GPIO_NUM_17   // WM2; note: shares with AUX_INPUT1 — use one or the other. Do NOT use GPIO19 (SD_CS).
-#define WATER_METER_DEBOUNCE_MS 50            // Debounce time in milliseconds
+#define WATER_METER_PIN         GPIO_NUM_17   // WM1; has internal pull-up (was GPIO34)
+#define WATER_METER_2_PIN       GPIO_NUM_34   // WM2; input-only, no pull-up — external 10k required. Do NOT use GPIO19 (SD_CS).
+#define WATER_METER_DEBOUNCE_MS 10000         // Cooldown between valid pulses (ms) – tuned for ≥30 s between real gallons
 #define WATER_METER_PULSES_PER_GAL  1         // Pulses per gallon (configurable)
 
 // ============================================================================
@@ -139,7 +139,7 @@
 // ============================================================================
 // HD44780-compatible LCD with PCF8574 I2C backpack
 
-#define LCD_I2C_ADDR            0x27          // Common I2C address (may be 0x3F)
+#define LCD_I2C_ADDR            0x27          // I2C address for this hardware
 #define LCD_COLS                20            // 20 characters per line
 #define LCD_ROWS                4             // 4 lines
 #define LCD_SDA_PIN             GPIO_NUM_21   // I2C Data
@@ -184,7 +184,7 @@
 // ============================================================================
 // For drum level switches or other safety interlocks
 
-#define AUX_INPUT1_PIN          GPIO_NUM_17   // Drum Level Switch 1
+#define AUX_INPUT1_PIN          GPIO_NUM_17   // Shares with WATER_METER_PIN — use one or the other
 // Note: GPIO18 repurposed for MAX31865 SCK. Drum level switch 2 no longer available.
 
 // ============================================================================
@@ -199,8 +199,15 @@
 #define ENCODER_BUTTON_PIN      GPIO_NUM_4    // SW  - Push button (active LOW, select/menu) on main MCU
 
 // Encoder Configuration
-#define ENCODER_STEPS_PER_NOTCH 4             // Pulses per detent (typical for KY-040)
-#define ENCODER_DEBOUNCE_MS     5             // Debounce time for rotation
+// Typical KY-040 style encoder produces 4 quadrature edges per physical detent.
+// One full detent (click) is treated as a single logical step in the UI and
+// value editors; higher-level code uses ENCODER_STEPS_PER_NOTCH so that
+// 1 detent = desired step size (e.g. 0.005 cups/gal).
+#define ENCODER_STEPS_PER_NOTCH 4             // Quadrature pulses per detent
+// Rotation debouncing is handled by the quadrature state machine and per-detent
+// accumulation in encoder.cpp; this constant is kept for compatibility but is
+// not used to suppress edges inside a detent.
+#define ENCODER_DEBOUNCE_MS     5             // Reserved: legacy rotation debounce (unused)
 #define ENCODER_BTN_DEBOUNCE_MS 50            // Debounce time for button
 #define ENCODER_LONG_PRESS_MS   1500          // Long press threshold (enter menu)
 #define ENCODER_DOUBLE_PRESS_MS 300           // Double press window
@@ -274,7 +281,7 @@
 | 14   | STEPPER1_DIR          | Output    | H2SO3 pump direction               |
 | 15   | ENCODER_PIN_A (CLK)   | Input     | Encoder output A (strapping)       |
 | 16   | MAX31865_CS           | Output    | RTD SPI chip select                |
-| 17   | AUX_INPUT1 / WM2      | Input     | Drum level switch or Water Meter 2 (use one) |
+| 17   | WATER_METER (WM1)     | Input     | Water meter pulses (has internal pull-up)    |
 | 18   | VSPI_SCK              | Output    | Shared SPI clock (MAX31865 + SD)   |
 | 19   | SD_CS                 | Output    | SD card chip select (VSPI)         |
 | 21   | I2C_SDA               | I/O       | LCD + ADS1115                      |
@@ -285,7 +292,7 @@
 | 27   | STEPPER2_STEP         | Output    | NaOH pump step                     |
 | 32   | STEPPER3_DIR          | Output    | Amine pump direction               |
 | 33   | STEPPER3_STEP         | Output    | Amine pump step                    |
-| 34   | WATER_METER           | Input     | Water meter pulses (input-only)    |
+| 34   | WATER_METER_2 / AUX   | Input     | WM2 or aux input (input-only, no pull-up)    |
 | 35   | FEEDWATER_PUMP_MON    | Input     | Pump contactor via optocoupler     |
 | 36   | EZO_EC_RX             | Input     | Atlas EZO-EC UART RX (input-only)  |
 | 39   | MAX31865_MISO         | Input     | RTD SPI data in (input-only)       |

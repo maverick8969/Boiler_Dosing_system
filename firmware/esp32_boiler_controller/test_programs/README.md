@@ -149,6 +149,24 @@ Features:
 - Serial debug at 115200 baud:
   - `p` = status, `d` = daily usage summary, `z` = reset totals, `s` = emergency stop, `h`/`?` = help
 
+**Encoder details and tuning:**
+
+- Hardware: KY-040 style rotary encoder; firmware assumes **4 quadrature edges per detent** via
+  `ENCODER_STEPS_PER_NOTCH` in `pin_definitions.h`.
+- UI behavior:
+  - One physical click = one logical menu step or value change:
+    - Dose/Gal: 0.005 cups/gal per click
+    - Dose/Day: 0.2 cups/day per click
+    - Calibration grams: 0.1 g per click
+  - Acceleration is enabled on menu screens and disabled on value-edit screens so each detent
+    maps cleanly to the expected increment.
+- Rotation debouncing is handled by the quadrature state machine and per-detent accumulation in
+  `encoder.cpp` (no time-based filtering of valid edges inside a click), which avoids missing fast
+  detents.
+- For troubleshooting detent counting, you can enable a verbose serial harness in
+  `test_dosing_pump.cpp` by setting `#define ENCODER_DEBUG 1` near the top of the file; this logs
+  menu selection changes and value-edit deltas for manual “N detents → N steps” checks.
+
 ### test_conductivity_sensor.cpp
 
 Tests the Sensorex CS675HTTC conductivity probe and Pt1000 RTD:
