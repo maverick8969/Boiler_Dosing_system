@@ -13,6 +13,8 @@ WaterMeterManager waterMeterManager;
 // Static ISR data
 static volatile uint32_t meter_pulse_counts[2] = {0, 0};
 static volatile uint32_t meter_last_pulse_times[2] = {0, 0};
+static volatile uint32_t meter_last_rising_ms[2] = {0, 0};
+static const uint8_t s_meter_pins[2] = {(uint8_t)WATER_METER_PIN, (uint8_t)WATER_METER_2_PIN};
 
 // ============================================================================
 // WATER METER IMPLEMENTATION
@@ -38,9 +40,9 @@ bool WaterMeter::begin() {
     // Configure pin with internal pull-up
     pinMode(_pin, INPUT_PULLUP);
 
-    // Attach interrupt
+    // Attach interrupt (CHANGE so we can record RISING and only count FALLING after min HIGH time)
     attachInterruptArg(digitalPinToInterrupt(_pin), handleInterrupt,
-                       (void*)(intptr_t)_meter_id, FALLING);
+                       (void*)(intptr_t)_meter_id, CHANGE);
 
     Serial.printf("Water Meter %d initialized on pin %d\n", _meter_id, _pin);
     return true;
@@ -184,9 +186,18 @@ void IRAM_ATTR WaterMeter::handleInterrupt(void* arg) {
     if (meter_id >= 2) return;
 
     uint32_t now = millis();
+    int level = digitalRead(s_meter_pins[meter_id]);
 
-    // Simple debounce
-    if (now - meter_last_pulse_times[meter_id] >= WATER_METER_DEBOUNCE_MS) {
+    if (level == HIGH) {
+        meter_last_rising_ms[meter_id] = now;
+        return;
+    }
+
+    // LOW: potential pulse — count only if debounce and "contact was open" (min HIGH time)
+    bool debounce_ok = (now - meter_last_pulse_times[meter_id] >= WATER_METER_DEBOUNCE_MS);
+    bool min_high_ok = (meter_last_rising_ms[meter_id] == 0) ||
+                       (now - meter_last_rising_ms[meter_id] >= WATER_METER_MIN_HIGH_MS);
+    if (debounce_ok && min_high_ok) {
         meter_pulse_counts[meter_id]++;
         meter_last_pulse_times[meter_id] = now;
     }

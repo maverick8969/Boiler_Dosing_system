@@ -165,6 +165,8 @@ private:
     volatile int32_t _last_position;
     volatile uint8_t _last_state;
     volatile uint32_t _last_rotation_time;
+    volatile uint32_t _last_delta_time;  // For rotation debouncing (ISR-safe, uses s_encoder_tick_ms)
+    volatile int8_t _pulse_count;        // Accumulator for detent event (reset in setPosition)
 
     // Button state
     volatile bool _button_pressed;
@@ -229,9 +231,11 @@ public:
 
     /**
      * @brief Process navigation - call in loop
+     * @param process_rotation If false, rotation events are consumed but selection is not updated
+     *        (use when editing values with getDelta() so rotation doesn't bounce menu selection)
      * @return true if selection changed
      */
-    bool update();
+    bool update(bool process_rotation = true);
 
     /**
      * @brief Check if enter was pressed

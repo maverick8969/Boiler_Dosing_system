@@ -90,7 +90,7 @@ static DosingConfig g_config_p1 = {
 static DosingConfig g_config_p2 = {
     DOSE_PER_GALLON,
     1.0f / 50.0f,
-    2.0f
+    2.0f / 7.0f   // Default: 1 pint/week = 2 cups/week = 2/7 cups/day (amine)
 };
 
 static DosingState g_state = {
@@ -106,27 +106,40 @@ static bool g_pump1_enabled = true;
 static bool g_pump2_enabled = true;
 
 // P2 additional state (P1 state lives in g_state)
-static float g_p2_eff_dose   = 1.0f / 50.0f;
+static float g_p2_eff_dose   = 2.0f / 7.0f;   // matches 1 pint/week default
 static float g_p2_cups_today = 0.0f;
 
 // Pump calibration: runtime steps per cup per pump (operator-calibrated).
 // Using Nema17 (200 steps/rev) at 16x microstepping → 3200 steps/rev.
-// Start with assumption: 1 rev ≈ 1/10 cup ⇒ ~10 rev/cup = 32000 steps/cup.
-static float g_steps_per_cup_p1 = 32000.0f;   // Pump 1 (H2SO3), updated via Calibrate menu
-static float g_steps_per_cup_p2 = 32000.0f;   // Pump 2 (NaOH), updated via Calibrate menu
+// Start with assumption: 1 rev ≈ 1/10 cup ⇒ ~10 rev/cup = 32000 steps/cup (nominal).
+static const float NOMINAL_STEPS_PER_CUP  = 32000.0f;
+static const float DEFAULT_STEPS_PER_CUP  = NOMINAL_STEPS_PER_CUP * (10.0f / 15.0f);  // adjusted for 10g → ~10g
+static const float CALIB_STEPS_MIN = 1000.0f;
+static const float CALIB_STEPS_MAX = 200000.0f;
+static const float CALIB_STEPS_INC = 500.0f;   // steps/cup per encoder detent (manual set)
+static float g_steps_per_cup_p1 = DEFAULT_STEPS_PER_CUP;   // Pump 1 (H2SO3), updated via Calibrate menu
+static float g_steps_per_cup_p2 = DEFAULT_STEPS_PER_CUP;   // Pump 2 (NaOH), updated via Calibrate menu
 
 // NVS persistence — calibration values are saved here and restored on boot.
 static Preferences g_prefs;
 static constexpr const char* NVS_NS = "dosing";   // namespace (≤15 chars)
 static constexpr const char* NVS_P1 = "spc_p1";   // steps-per-cup pump 1
 static constexpr const char* NVS_P2 = "spc_p2";   // steps-per-cup pump 2
+static constexpr const char* NVS_P1_MODE    = "mode_p1";
+static constexpr const char* NVS_P1_DOSE_GAL = "dose_gal_p1";
+static constexpr const char* NVS_P1_DOSE_DAY = "dose_day_p1";
+static constexpr const char* NVS_P2_MODE    = "mode_p2";
+static constexpr const char* NVS_P2_DOSE_GAL = "dose_gal_p2";
+static constexpr const char* NVS_P2_DOSE_DAY = "dose_day_p2";
 static void loadCalibration();   // forward decl — defined near setup()
-static void saveCalibration();   // forward decl — defined near setup()
+static bool saveCalibration();   // forward decl — returns true if NVS write succeeded
+static void loadDoseConfig();   // forward decl — defined near setup()
+static void saveDoseConfig();   // forward decl — defined near setup()
 
 // Calibration uses grams as the operator unit and converts to cups internally.
 // Approximate density → 1 US cup ≈ 236.6 g (close enough for dosing purposes).
 static const float GRAMS_PER_CUP      = 236.6f;
-static const float CALIB_TARGET_GRAMS = 50.0f;   // aim for ~50 g test shot
+static const float CALIB_TARGET_GRAMS = 10.0f;   // aim for ~10 g test shot
 
 // Day length for "today" statistics (ms). 24 hours = 86,400,000 ms.
 static const uint32_t DAY_WINDOW_MS = 24UL * 60UL * 60UL * 1000UL;
@@ -160,6 +173,11 @@ enum UiState {
     UI_EDIT_P2_DOSE_DAY,
     UI_PUMP_ENABLE_MENU,
     UI_CALIBRATE_MENU,
+    UI_CALIBRATE_PUMP_SELECT,
+    UI_CALIBRATE_MANUAL_MENU,
+    UI_EDIT_CALIB_P1,
+    UI_EDIT_CALIB_P2,
+    UI_CALIBRATE_RESET_DONE,
     UI_CALIBRATE
 };
 
@@ -167,7 +185,8 @@ enum CalibSubState {
     CALIB_READY = 0,
     CALIB_RUNNING,
     CALIB_MEASURE,
-    CALIB_SAVED
+    CALIB_SAVED,
+    CALIB_SAVE_FAILED
 };
 
 static UiState       g_ui_state  = UI_HOME;
@@ -175,6 +194,8 @@ static UiState       g_last_ui_state = UI_HOME;
 static CalibSubState g_calib_state = CALIB_READY;
 static float         g_calib_measured_grams = 0.0f;
 static uint32_t      g_calib_saved_ms = 0;
+static uint32_t      g_calib_save_failed_ms = 0;
+static uint32_t      g_calib_reset_done_ms = 0;
 static long          g_calib_last_steps = 0;
 static int           g_prime_pump = 0;   // 0 = P1 (H2SO3), 1 = P2 (NaOH)
 static int           g_calib_pump = 0;   // 0 = P1, 1 = P2
@@ -188,10 +209,22 @@ static int           g_calib_pump = 0;   // 0 = P1, 1 = P2
 
 static volatile uint32_t s_pulse_count = 0;
 static volatile uint32_t s_last_pulse_ms = 0;
+static volatile uint32_t s_last_rising_ms = 0;
 
 void IRAM_ATTR onWaterMeterPulse() {
     uint32_t now = millis();
-    if (now - s_last_pulse_ms >= WATER_METER_DEBOUNCE_MS) {
+    int level = digitalRead(WATER_METER_PIN);
+
+    if (level == HIGH) {
+        s_last_rising_ms = now;
+        return;
+    }
+
+    // LOW: potential pulse — count only if debounce and "contact was open" (min HIGH time)
+    bool debounce_ok = (now - s_last_pulse_ms >= WATER_METER_DEBOUNCE_MS);
+    bool min_high_ok = (s_last_rising_ms == 0) ||
+                       (now - s_last_rising_ms >= WATER_METER_MIN_HIGH_MS);
+    if (debounce_ok && min_high_ok) {
         s_pulse_count++;
         s_last_pulse_ms = now;
     }
@@ -230,14 +263,14 @@ static float consumeNewGallons() {
 // STEP pin rises; on the second it falls (one complete step) and the counter
 // decrements.  gpio_set_level() is IRAM-safe so it is safe inside an ISR.
 //
-// Timing: PUMP_FEED_MM_PER_SEC=100, PUMP_STEPS_PER_MM=16 → 1 600 steps/s
-//         half-period = 500 000 / 1 600 = 312 µs
+// Timing: PUMP_FEED_MM_PER_SEC=150, PUMP_STEPS_PER_MM=16 → 2 400 steps/s
+//         half-period = 500 000 / 2 400 ≈ 208 µs
 
 // Shared pump mechanics — TB6600 at 8× microstepping (1 600 steps/rev)
 static const float PUMP_STEPS_PER_REV   = 1600.0f;  // 200 steps × 8 microsteps
 static const float PUMP_MM_PER_REV      = 100.0f;   // 1 rev = 100 mm (tune on hardware)
 static const float PUMP_STEPS_PER_MM    = PUMP_STEPS_PER_REV / PUMP_MM_PER_REV;
-static const float PUMP_FEED_MM_PER_SEC = 100.0f;   // ~1 rev/s
+static const float PUMP_FEED_MM_PER_SEC = 150.0f;   // ~1.5 rev/s
 static const float PUMP_MM_PER_GALLON   = 1000.0f;
 
 // Shared enable state — true when either pump is running
@@ -545,6 +578,9 @@ static void lcdDrawDoseMenu();
 static void lcdDrawPumpEnableMenu();
 static void lcdDrawResetConfirm();
 static void lcdDrawCalibrateMenu();
+static void lcdDrawCalibratePumpSelect();
+static void lcdDrawCalibrateManualMenu();
+static void lcdDrawCalibrateResetDone();
 static void lcdDrawCalibrate();
 static void lcdDrawMenuList(const char* title, const char* const* items, int count, int selected);
 static void lcdDrawEditValue(const char* title, const char* unit, float value);
@@ -631,13 +667,83 @@ static void lcdDrawPrimeMenu() {
 }
 
 static void lcdDrawCalibrateMenu() {
+    char line[21];
+
+    // Title on row 0
+    lcd.setCursor(0, 0);
+    snprintf(line, sizeof(line), "%-20s", " -- CALIBRATE --    ");
+    lcd.print(line);
+
+    // Row 1: show unitless k ratios relative to nominal steps-per-cup.
+    float k1 = g_steps_per_cup_p1 / NOMINAL_STEPS_PER_CUP;
+    float k2 = g_steps_per_cup_p2 / NOMINAL_STEPS_PER_CUP;
+    if (k1 < 0.10f) k1 = 0.10f;
+    if (k1 > 5.00f) k1 = 5.00f;
+    if (k2 < 0.10f) k2 = 0.10f;
+    if (k2 > 5.00f) k2 = 5.00f;
+
+    lcd.setCursor(0, 1);
+    snprintf(line, sizeof(line), "%-20s", "");
+    snprintf(line, sizeof(line), "P1k:%.2f P2k:%.2f", k1, k2);
+    lcd.print(line);
+
+    // Rows 2–3: 2-item sliding window for the 4 menu items.
+    static const char* const ITEMS[] = {
+        "Dose 10g & check",
+        "Manually set",
+        "Reset to default",
+        "Back"
+    };
+    int selected = menuNav.getSelectedIndex();
+    int first = (selected <= 1) ? 0 : 2;
+    for (int row = 0; row < 2; ++row) {
+        int idx = first + row;
+        lcd.setCursor(0, row + 2);
+        if (idx < 4) {
+            snprintf(line, sizeof(line), "%c%-19s",
+                     (idx == selected) ? '>' : ' ',
+                     ITEMS[idx]);
+        } else {
+            snprintf(line, sizeof(line), "%20s", "");
+        }
+        lcd.print(line);
+    }
+}
+
+static void lcdDrawCalibratePumpSelect() {
     static const char* const ITEMS[] = {
         "Pump 1 (Sulfite)",
         "Pump 2 (Amine)",
         "Back"
     };
     int selected = menuNav.getSelectedIndex();
-    lcdDrawMenuList(" -- CALIBRATE --    ", ITEMS, 3, selected);
+    lcdDrawMenuList(" Pick pump (10g)    ", ITEMS, 3, selected);
+}
+
+static void lcdDrawCalibrateManualMenu() {
+    static const char* const ITEMS[] = {
+        "P1 steps/cup",
+        "P2 steps/cup",
+        "Back"
+    };
+    int selected = menuNav.getSelectedIndex();
+    lcdDrawMenuList(" - SET CALIB -      ", ITEMS, 3, selected);
+}
+
+static void lcdDrawCalibrateResetDone() {
+    char line[21];
+    lcd.setCursor(0, 0);
+    snprintf(line, sizeof(line), " -- CALIBRATE --    ");
+    lcd.print(line);
+    lcd.setCursor(0, 1);
+    snprintf(line, sizeof(line), " Calibration reset  ");
+    lcd.print(line);
+    lcd.setCursor(0, 2);
+    snprintf(line, sizeof(line), " to default         ");
+    lcd.print(line);
+    lcd.setCursor(0, 3);
+    snprintf(line, sizeof(line), " P1=P2=21333        ");
+    lcd.print(line);
 }
 
 static void lcdDrawDoseMenu() {
@@ -735,7 +841,7 @@ static void lcdDrawCalibrate() {
             lcd.print(line);
 
             lcd.setCursor(0, 1);
-            snprintf(line, sizeof(line), "  Test dose: ~50g   ");
+            snprintf(line, sizeof(line), "  Test dose: ~10g   ");
             lcd.print(line);
 
             lcd.setCursor(0, 2);
@@ -753,7 +859,7 @@ static void lcdDrawCalibrate() {
             lcd.print(line);
 
             lcd.setCursor(0, 1);
-            snprintf(line, sizeof(line), "  Dispensing ~50g   ");
+            snprintf(line, sizeof(line), "  Dispensing ~10g   ");
             lcd.print(line);
 
             lcd.setCursor(0, 2);
@@ -783,14 +889,33 @@ static void lcdDrawCalibrate() {
             lcd.print(line);
             break;
 
-        case CALIB_SAVED:
-        default:
+        case CALIB_SAVE_FAILED:
             lcd.setCursor(0, 0);
             snprintf(line, sizeof(line), " -- CAL %s --       ", plabel);
             lcd.print(line);
 
             lcd.setCursor(0, 1);
-            snprintf(line, sizeof(line), "  Calibration saved ");
+            snprintf(line, sizeof(line), "  Save failed        ");
+            lcd.print(line);
+
+            lcd.setCursor(0, 2);
+            snprintf(line, sizeof(line), "  Try again          ");
+            lcd.print(line);
+
+            lcd.setCursor(0, 3);
+            snprintf(line, sizeof(line), "                    ");
+            lcd.print(line);
+            break;
+
+        case CALIB_SAVED:
+        default: {
+            float saved_steps = (g_calib_pump == 0) ? g_steps_per_cup_p1 : g_steps_per_cup_p2;
+            lcd.setCursor(0, 0);
+            snprintf(line, sizeof(line), " Calibration saved  ");
+            lcd.print(line);
+
+            lcd.setCursor(0, 1);
+            snprintf(line, sizeof(line), " %s: %.0f steps/cup ", plabel, saved_steps);
             lcd.print(line);
 
             lcd.setCursor(0, 2);
@@ -798,9 +923,10 @@ static void lcdDrawCalibrate() {
             lcd.print(line);
 
             lcd.setCursor(0, 3);
-            snprintf(line, sizeof(line), "                    ");
+            snprintf(line, sizeof(line), "  Press to continue  ");
             lcd.print(line);
             break;
+        }
     }
 }
 
@@ -849,6 +975,21 @@ static void lcdUpdate() {
         case UI_CALIBRATE_MENU:
             lcdDrawCalibrateMenu();
             break;
+        case UI_CALIBRATE_PUMP_SELECT:
+            lcdDrawCalibratePumpSelect();
+            break;
+        case UI_CALIBRATE_MANUAL_MENU:
+            lcdDrawCalibrateManualMenu();
+            break;
+        case UI_EDIT_CALIB_P1:
+            lcdDrawEditValue(" - P1 STEPS/CUP -   ", "steps", g_steps_per_cup_p1);
+            break;
+        case UI_EDIT_CALIB_P2:
+            lcdDrawEditValue(" - P2 STEPS/CUP -   ", "steps", g_steps_per_cup_p2);
+            break;
+        case UI_CALIBRATE_RESET_DONE:
+            lcdDrawCalibrateResetDone();
+            break;
         case UI_CALIBRATE:
             lcdDrawCalibrate();
             break;
@@ -887,6 +1028,7 @@ static void uiTransitionTo(UiState newState) {
     // Use 1 step per detent on value-edit screens so dose/gal steps are exactly 0.005
     if (newState == UI_EDIT_P1_DOSE_GAL || newState == UI_EDIT_P2_DOSE_GAL ||
         newState == UI_EDIT_P1_DOSE_DAY || newState == UI_EDIT_P2_DOSE_DAY ||
+        newState == UI_EDIT_CALIB_P1 || newState == UI_EDIT_CALIB_P2 ||
         newState == UI_CALIBRATE) {
         encoder.setAcceleration(false);
     } else {
@@ -911,19 +1053,32 @@ static void uiTransitionTo(UiState newState) {
             menuNav.setSelectedIndex(0);
             break;
         case UI_CALIBRATE_MENU:
+            menuNav.setMenu(4, true);   // Dose 10g, Manually set, Reset, Back
+            menuNav.setSelectedIndex(0);
+            break;
+        case UI_CALIBRATE_PUMP_SELECT:
             menuNav.setMenu(3, true);   // Pump 1, Pump 2, Back
+            menuNav.setSelectedIndex(0);
+            break;
+        case UI_CALIBRATE_MANUAL_MENU:
+            menuNav.setMenu(3, true);   // P1 steps/cup, P2 steps/cup, Back
             menuNav.setSelectedIndex(0);
             break;
         case UI_EDIT_P1_DOSE_GAL:
         case UI_EDIT_P1_DOSE_DAY:
         case UI_EDIT_P2_DOSE_GAL:
         case UI_EDIT_P2_DOSE_DAY:
+        case UI_EDIT_CALIB_P1:
+        case UI_EDIT_CALIB_P2:
             encoder.clearLimits();
             encoder.resetPosition();   // Reset so getDelta() starts clean
             break;
         case UI_CALIBRATE:
             encoder.clearLimits();
             encoder.resetPosition();
+            break;
+        case UI_CALIBRATE_RESET_DONE:
+            g_calib_reset_done_ms = millis();
             break;
         default:
             // Other screens do not use list navigation
@@ -943,12 +1098,81 @@ static void handleMenuNavigation() {
     // Update encoder internal state (button, acceleration)
     encoder.update();
 
-    // When editing values (dose/gal, dose/day, calibrate measure), rotation drives getDelta()
+    // Apply encoder rotation for value-edit states BEFORE menuNav.update() drains the event queue,
+    // so rotation is applied from encoder position/delta before CW/CCW events are consumed.
+    switch (g_ui_state) {
+        case UI_EDIT_CALIB_P1: {
+            int32_t delta = encoder.getDelta();
+            if (delta != 0) {
+                float v = g_steps_per_cup_p1 + (delta * CALIB_STEPS_INC);
+                if (v < CALIB_STEPS_MIN) v = CALIB_STEPS_MIN;
+                if (v > CALIB_STEPS_MAX) v = CALIB_STEPS_MAX;
+                g_steps_per_cup_p1 = v;
+            }
+            break;
+        }
+        case UI_EDIT_CALIB_P2: {
+            int32_t delta = encoder.getDelta();
+            if (delta != 0) {
+                float v = g_steps_per_cup_p2 + (delta * CALIB_STEPS_INC);
+                if (v < CALIB_STEPS_MIN) v = CALIB_STEPS_MIN;
+                if (v > CALIB_STEPS_MAX) v = CALIB_STEPS_MAX;
+                g_steps_per_cup_p2 = v;
+            }
+            break;
+        }
+        case UI_EDIT_P1_DOSE_GAL: {
+            int32_t delta = encoder.getDelta();
+            if (delta != 0) {
+                float v = g_config_p1.dose_per_gallon_cups + (delta * DOSE_GAL_INC);
+                if (v < 0.0f) v = 0.0f;
+                if (v > 1.0f) v = 1.0f;
+                g_config_p1.dose_per_gallon_cups = roundf(v / DOSE_GAL_STEP_PER_DETENT) * DOSE_GAL_STEP_PER_DETENT;
+            }
+            break;
+        }
+        case UI_EDIT_P1_DOSE_DAY: {
+            int32_t delta = encoder.getDelta();
+            if (delta != 0) {
+                float v = g_config_p1.target_cups_per_day + (delta * DOSE_DAY_INC);
+                if (v < 0.0f) v = 0.0f;
+                if (v > 10.0f) v = 10.0f;
+                g_config_p1.target_cups_per_day = v;
+            }
+            break;
+        }
+        case UI_EDIT_P2_DOSE_GAL: {
+            int32_t delta = encoder.getDelta();
+            if (delta != 0) {
+                float v = g_config_p2.dose_per_gallon_cups + (delta * DOSE_GAL_INC);
+                if (v < 0.0f) v = 0.0f;
+                if (v > 1.0f) v = 1.0f;
+                g_config_p2.dose_per_gallon_cups = roundf(v / DOSE_GAL_STEP_PER_DETENT) * DOSE_GAL_STEP_PER_DETENT;
+            }
+            break;
+        }
+        case UI_EDIT_P2_DOSE_DAY: {
+            int32_t delta = encoder.getDelta();
+            if (delta != 0) {
+                float v = g_config_p2.target_cups_per_day + (delta * DOSE_DAY_INC);
+                if (v < 0.0f) v = 0.0f;
+                if (v > 10.0f) v = 10.0f;
+                g_config_p2.target_cups_per_day = v;
+            }
+            break;
+        }
+        default:
+            break;
+    }
+
+    // When editing values (dose/gal, dose/day, calibrate measure, manual calib), rotation drives getDelta()
     // not menu selection — pass false so we don't bounce between menu items
     bool process_rotation = (g_ui_state != UI_EDIT_P1_DOSE_GAL &&
                              g_ui_state != UI_EDIT_P1_DOSE_DAY &&
                              g_ui_state != UI_EDIT_P2_DOSE_GAL &&
                              g_ui_state != UI_EDIT_P2_DOSE_DAY &&
+                             g_ui_state != UI_EDIT_CALIB_P1 &&
+                             g_ui_state != UI_EDIT_CALIB_P2 &&
                              !(g_ui_state == UI_CALIBRATE && g_calib_state == CALIB_MEASURE));
     bool selection_changed = menuNav.update(process_rotation);
 
@@ -968,6 +1192,15 @@ static void handleMenuNavigation() {
             // Redo calibration shot: go back to READY without changing calibration.
             g_calib_measured_grams = 0.0f;
             g_calib_state = CALIB_READY;
+            return;
+        }
+        // From calibration submenus, long-press returns to calibration menu (not home).
+        if (g_ui_state == UI_CALIBRATE_PUMP_SELECT || g_ui_state == UI_CALIBRATE_MANUAL_MENU) {
+            uiTransitionTo(UI_CALIBRATE_MENU);
+            return;
+        }
+        if (g_ui_state == UI_EDIT_CALIB_P1 || g_ui_state == UI_EDIT_CALIB_P2) {
+            uiTransitionTo(UI_CALIBRATE_MANUAL_MENU);
             return;
         }
 
@@ -1084,15 +1317,19 @@ static void handleMenuNavigation() {
             int sel = menuNav.getSelectedIndex();
             if (menuNav.enterPressed()) {
                 switch (sel) {
-                    case 0: // Pump 1 (H2SO3)
-                        g_calib_pump = 0;
-                        uiTransitionTo(UI_CALIBRATE);
+                    case 0: // Dose 10g & check → pump select
+                        uiTransitionTo(UI_CALIBRATE_PUMP_SELECT);
                         break;
-                    case 1: // Pump 2 (NaOH)
-                        g_calib_pump = 1;
-                        uiTransitionTo(UI_CALIBRATE);
+                    case 1: // Manually set → manual menu
+                        uiTransitionTo(UI_CALIBRATE_MANUAL_MENU);
                         break;
-                    case 2: // Back
+                    case 2: // Reset to default
+                        g_steps_per_cup_p1 = DEFAULT_STEPS_PER_CUP;
+                        g_steps_per_cup_p2 = DEFAULT_STEPS_PER_CUP;
+                        saveCalibration();
+                        uiTransitionTo(UI_CALIBRATE_RESET_DONE);
+                        break;
+                    case 3: // Back
                         uiTransitionTo(UI_MENU);
                         break;
                     default:
@@ -1102,81 +1339,96 @@ static void handleMenuNavigation() {
             break;
         }
 
-        case UI_EDIT_P1_DOSE_GAL: {
-            // Edit P1 base dose per gallon (0–1 cups/gal); one physical click = 0.005 cups/gal
-            int32_t delta = encoder.getDelta();
-#if ENCODER_DEBUG
-            if (delta != 0) {
-                Serial.print("[ENC] UI_EDIT_P1_DOSE_GAL detent delta=");
-                Serial.println(delta);
+        case UI_CALIBRATE_PUMP_SELECT: {
+            int sel = menuNav.getSelectedIndex();
+            if (menuNav.enterPressed()) {
+                switch (sel) {
+                    case 0: // Pump 1 (Sulfite)
+                        g_calib_pump = 0;
+                        uiTransitionTo(UI_CALIBRATE);
+                        break;
+                    case 1: // Pump 2 (Amine)
+                        g_calib_pump = 1;
+                        uiTransitionTo(UI_CALIBRATE);
+                        break;
+                    case 2: // Back
+                        uiTransitionTo(UI_CALIBRATE_MENU);
+                        break;
+                    default:
+                        break;
+                }
             }
-#endif
-            if (delta != 0) {
-                float v = g_config_p1.dose_per_gallon_cups + (delta * DOSE_GAL_INC);
-                if (v < 0.0f) v = 0.0f;
-                if (v > 1.0f) v = 1.0f;
-                g_config_p1.dose_per_gallon_cups = roundf(v / DOSE_GAL_STEP_PER_DETENT) * DOSE_GAL_STEP_PER_DETENT;
-            }
-            if (menuNav.enterPressed()) { uiTransitionTo(UI_DOSE_MENU); }
             break;
         }
 
-        case UI_EDIT_P1_DOSE_DAY: {
-            // Edit P1 target cups per day (0–10); one physical click = 0.2 cups/day
-            int32_t delta = encoder.getDelta();
-#if ENCODER_DEBUG
-            if (delta != 0) {
-                Serial.print("[ENC] UI_EDIT_P1_DOSE_DAY detent delta=");
-                Serial.println(delta);
+        case UI_CALIBRATE_MANUAL_MENU: {
+            int sel = menuNav.getSelectedIndex();
+            if (menuNav.enterPressed()) {
+                switch (sel) {
+                    case 0: // P1 steps/cup
+                        uiTransitionTo(UI_EDIT_CALIB_P1);
+                        break;
+                    case 1: // P2 steps/cup
+                        uiTransitionTo(UI_EDIT_CALIB_P2);
+                        break;
+                    case 2: // Back
+                        uiTransitionTo(UI_CALIBRATE_MENU);
+                        break;
+                    default:
+                        break;
+                }
             }
-#endif
-            if (delta != 0) {
-                float v = g_config_p1.target_cups_per_day + (delta * DOSE_DAY_INC);
-                if (v < 0.0f) v = 0.0f;
-                if (v > 10.0f) v = 10.0f;
-                g_config_p1.target_cups_per_day = v;
-            }
-            if (menuNav.enterPressed()) { uiTransitionTo(UI_DOSE_MENU); }
             break;
         }
 
-        case UI_EDIT_P2_DOSE_GAL: {
-            // Edit P2 base dose per gallon (0–1 cups/gal); one physical click = 0.005 cups/gal
-            int32_t delta = encoder.getDelta();
-#if ENCODER_DEBUG
-            if (delta != 0) {
-                Serial.print("[ENC] UI_EDIT_P2_DOSE_GAL detent delta=");
-                Serial.println(delta);
+        case UI_EDIT_CALIB_P1:
+            if (menuNav.enterPressed()) {
+                saveCalibration();
+                uiTransitionTo(UI_CALIBRATE_MANUAL_MENU);
             }
-#endif
-            if (delta != 0) {
-                float v = g_config_p2.dose_per_gallon_cups + (delta * DOSE_GAL_INC);
-                if (v < 0.0f) v = 0.0f;
-                if (v > 1.0f) v = 1.0f;
-                g_config_p2.dose_per_gallon_cups = roundf(v / DOSE_GAL_STEP_PER_DETENT) * DOSE_GAL_STEP_PER_DETENT;
-            }
-            if (menuNav.enterPressed()) { uiTransitionTo(UI_DOSE_MENU); }
             break;
-        }
 
-        case UI_EDIT_P2_DOSE_DAY: {
-            // Edit P2 target cups per day (0–10); one physical click = 0.2 cups/day
-            int32_t delta = encoder.getDelta();
-#if ENCODER_DEBUG
-            if (delta != 0) {
-                Serial.print("[ENC] UI_EDIT_P2_DOSE_DAY detent delta=");
-                Serial.println(delta);
+        case UI_EDIT_CALIB_P2:
+            if (menuNav.enterPressed()) {
+                saveCalibration();
+                uiTransitionTo(UI_CALIBRATE_MANUAL_MENU);
             }
-#endif
-            if (delta != 0) {
-                float v = g_config_p2.target_cups_per_day + (delta * DOSE_DAY_INC);
-                if (v < 0.0f) v = 0.0f;
-                if (v > 10.0f) v = 10.0f;
-                g_config_p2.target_cups_per_day = v;
-            }
-            if (menuNav.enterPressed()) { uiTransitionTo(UI_DOSE_MENU); }
             break;
-        }
+
+        case UI_CALIBRATE_RESET_DONE:
+            if (millis() - g_calib_reset_done_ms > 1500U) {
+                uiTransitionTo(UI_CALIBRATE_MENU);
+            }
+            break;
+
+        case UI_EDIT_P1_DOSE_GAL:
+            // Rotation applied above before menuNav.update()
+            if (menuNav.enterPressed()) {
+                saveDoseConfig();
+                uiTransitionTo(UI_DOSE_MENU);
+            }
+            break;
+
+        case UI_EDIT_P1_DOSE_DAY:
+            if (menuNav.enterPressed()) {
+                saveDoseConfig();
+                uiTransitionTo(UI_DOSE_MENU);
+            }
+            break;
+
+        case UI_EDIT_P2_DOSE_GAL:
+            if (menuNav.enterPressed()) {
+                saveDoseConfig();
+                uiTransitionTo(UI_DOSE_MENU);
+            }
+            break;
+
+        case UI_EDIT_P2_DOSE_DAY:
+            if (menuNav.enterPressed()) {
+                saveDoseConfig();
+                uiTransitionTo(UI_DOSE_MENU);
+            }
+            break;
 
         case UI_PRIME:
             // Prime screen: short press returns to main menu; long press already stops pumps.
@@ -1223,8 +1475,7 @@ static void handleMenuNavigation() {
                 case CALIB_READY:
                     if (menuNav.enterPressed()) {
                         float* steps_ptr = (g_calib_pump == 0) ? &g_steps_per_cup_p1 : &g_steps_per_cup_p2;
-                        float fallback_steps_per_cup = 32000.0f;
-                        float steps_per_cup = (*steps_ptr > 0.0f) ? *steps_ptr : fallback_steps_per_cup;
+                        float steps_per_cup = (*steps_ptr > 0.0f) ? *steps_ptr : DEFAULT_STEPS_PER_CUP;
                         float steps_per_gram = steps_per_cup / GRAMS_PER_CUP;
                         long calib_steps = (long)lroundf(steps_per_gram * CALIB_TARGET_GRAMS);
                         if (calib_steps <= 0) {
@@ -1257,17 +1508,30 @@ static void handleMenuNavigation() {
                         } else {
                             g_steps_per_cup_p2 = new_steps;
                         }
-                        saveCalibration();   // persist to NVS before transitioning
-                        g_calib_state = CALIB_SAVED;
-                        g_calib_saved_ms = millis();
+                        if (saveCalibration()) {
+                            g_calib_state = CALIB_SAVED;
+                            g_calib_saved_ms = millis();
+                        } else {
+                            g_calib_state = CALIB_SAVE_FAILED;
+                            g_calib_save_failed_ms = millis();
+                        }
                     }
                     break;
                 }
 
-                case CALIB_SAVED:
-                    // After a brief confirmation, return to main menu.
-                    if (millis() - g_calib_saved_ms > 1500U) {
+                case CALIB_SAVED: {
+                    // Return to main menu on encoder press or after 10 s fallback.
+                    uint32_t elapsed = millis() - g_calib_saved_ms;
+                    if (menuNav.enterPressed() || elapsed > 10000U) {
                         uiTransitionTo(UI_MENU);
+                    }
+                    break;
+                }
+
+                case CALIB_SAVE_FAILED:
+                    // After 2.5 s return to measure screen so user can retry.
+                    if (millis() - g_calib_save_failed_ms > 2500U) {
+                        g_calib_state = CALIB_MEASURE;
                     }
                     break;
 
@@ -1432,17 +1696,55 @@ static void loadCalibration() {
 }
 
 // Persists the current g_steps_per_cup_p1 / _p2 to NVS.
-// Call this immediately after a successful calibration save.
-static void saveCalibration() {
+// Returns true if write succeeded, false if NVS could not be opened.
+static bool saveCalibration() {
     if (!g_prefs.begin(NVS_NS, /*readOnly=*/false)) {
         Serial.println("[NVS] ERROR: could not open NVS for writing — calibration NOT saved.");
-        return;
+        return false;
     }
     g_prefs.putFloat(NVS_P1, g_steps_per_cup_p1);
     g_prefs.putFloat(NVS_P2, g_steps_per_cup_p2);
     g_prefs.end();
     Serial.printf("[NVS] Calibration saved:  P1=%.1f steps/cup  P2=%.1f steps/cup\n",
                   g_steps_per_cup_p1, g_steps_per_cup_p2);
+    return true;
+}
+
+// Loads g_config_p1 / g_config_p2 from NVS and updates effective dose state.
+// If no saved values exist, in-memory defaults are left unchanged.
+static void loadDoseConfig() {
+    if (!g_prefs.begin(NVS_NS, /*readOnly=*/true)) {
+        Serial.println("[NVS] No saved dose config; using firmware defaults.");
+        return;
+    }
+    uint8_t mode_p1 = (uint8_t)g_prefs.getUChar(NVS_P1_MODE, (uint8_t)g_config_p1.mode);
+    uint8_t mode_p2 = (uint8_t)g_prefs.getUChar(NVS_P2_MODE, (uint8_t)g_config_p2.mode);
+    g_config_p1.mode = (DoseMode)(mode_p1 > 1 ? 0 : mode_p1);
+    g_config_p2.mode = (DoseMode)(mode_p2 > 1 ? 0 : mode_p2);
+    g_config_p1.dose_per_gallon_cups = g_prefs.getFloat(NVS_P1_DOSE_GAL, g_config_p1.dose_per_gallon_cups);
+    g_config_p1.target_cups_per_day = g_prefs.getFloat(NVS_P1_DOSE_DAY, g_config_p1.target_cups_per_day);
+    g_config_p2.dose_per_gallon_cups = g_prefs.getFloat(NVS_P2_DOSE_GAL, g_config_p2.dose_per_gallon_cups);
+    g_config_p2.target_cups_per_day = g_prefs.getFloat(NVS_P2_DOSE_DAY, g_config_p2.target_cups_per_day);
+    g_prefs.end();
+    g_state.cups_per_gallon_effective = computeEffectiveDose(g_config_p1);
+    g_p2_eff_dose                     = computeEffectiveDose(g_config_p2);
+    Serial.println("[NVS] Dose config loaded.");
+}
+
+// Persists g_config_p1 / g_config_p2 to NVS.
+static void saveDoseConfig() {
+    if (!g_prefs.begin(NVS_NS, /*readOnly=*/false)) {
+        Serial.println("[NVS] ERROR: could not open NVS for writing — dose config NOT saved.");
+        return;
+    }
+    g_prefs.putUChar(NVS_P1_MODE, (uint8_t)g_config_p1.mode);
+    g_prefs.putFloat(NVS_P1_DOSE_GAL, g_config_p1.dose_per_gallon_cups);
+    g_prefs.putFloat(NVS_P1_DOSE_DAY, g_config_p1.target_cups_per_day);
+    g_prefs.putUChar(NVS_P2_MODE, (uint8_t)g_config_p2.mode);
+    g_prefs.putFloat(NVS_P2_DOSE_GAL, g_config_p2.dose_per_gallon_cups);
+    g_prefs.putFloat(NVS_P2_DOSE_DAY, g_config_p2.target_cups_per_day);
+    g_prefs.end();
+    Serial.println("[NVS] Dose config saved.");
 }
 
 // ============================================================================
@@ -1459,15 +1761,16 @@ void setup() {
     Serial.println("========================================");
     Serial.println();
 
-    // Restore calibration from NVS before initialising the pump
+    // Restore calibration and dose config from NVS before initialising the pump
     loadCalibration();
+    loadDoseConfig();
 
     // Initialize pump
     pumpInit();
 
     // Initialize water meter input
     pinMode(WATER_METER_PIN, INPUT_PULLUP);
-    attachInterrupt(digitalPinToInterrupt(WATER_METER_PIN), onWaterMeterPulse, FALLING);
+    attachInterrupt(digitalPinToInterrupt(WATER_METER_PIN), onWaterMeterPulse, CHANGE);
 
     // Initialize LCD, encoder, and menu
     lcdInit();
