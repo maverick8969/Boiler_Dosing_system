@@ -22,6 +22,13 @@
  * - Build with PlatformIO env: [env:test_dosing_pump]
  * - Open Serial Monitor at 115200 baud
  * - Use encoder to navigate LCD menu; use serial for debug/inspect
+ *
+ * OTA (Over-The-Air) updates — AP mode:
+ * - The controller creates a WiFi access point (SSID/password below). Connect your
+ *   laptop to that AP, then upload firmware to the printed IP (usually 192.168.4.1).
+ * - First flash must be via USB. For subsequent updates:
+ *   pio run -e test_dosing_pump -t upload --upload-port <AP_IP>
+ * - Serial Monitor shows the AP SSID and IP at boot.
  */
 
 #include <Arduino.h>
@@ -33,10 +40,14 @@
 #include "encoder.h"
 #include <Preferences.h>
 
+#include <WiFi.h>
+#include <ArduinoOTA.h>
+
 // Optional encoder debug — set to 1 to enable verbose serial logging of
 // menu movements and value-edit deltas for manual detent testing.
-#define ENCODER_DEBUG 1
+#define ENCODER_DEBUG 0
 
+#if ENCODER_DEBUG
 // #region agent log
 static void agentDebugLog(const char* location, const char* message, const char* hypothesisId, int32_t value) {
     if (!Serial) {
@@ -55,6 +66,14 @@ static void agentDebugLog(const char* location, const char* message, const char*
     Serial.println("}");
 }
 // #endregion
+#endif
+
+// ============================================================================
+// OTA / WIFI AP — ESP32 hosts an AP; laptop connects to push OTA updates
+// ============================================================================
+#define OTA_AP_SSID "BoilerDosing-OTA"
+#define OTA_AP_PASS "password123"
+#define OTA_HOSTNAME "dosing-pump-test"
 
 // ============================================================================
 // DOSING CONFIGURATION
@@ -203,7 +222,9 @@ static int           g_calib_pump = 0;   // 0 = P1, 1 = P2
 // ============================================================================
 // WATER METER PULSE TRACKING (SINGLE METER)
 // ============================================================================
-
+// Timing validated for: 1 gallon at fastest every 3 min, pulse (contact closed)
+// at least 10 s. One count on first LOW edge; 45 s debounce and 1 s min HIGH
+// accept all such pulses without double-count.
 // Use canonical definitions from pin_definitions.h
 // WATER_METER_PIN, WATER_METER_DEBOUNCE_MS, WATER_METER_PULSES_PER_GAL
 
@@ -513,8 +534,10 @@ static void processDosingFromWaterMeter() {
     if (g_pump1_enabled) {
         float cups_p1 = delta_gallons * g_state.cups_per_gallon_effective;
         long  steps_p1 = (long)roundf(cups_p1 * g_steps_per_cup_p1);
+#if ENCODER_DEBUG
         agentDebugLog("test_dosing_pump.cpp:processDosingFromWaterMeter",
                       "P1_steps", "D1", steps_p1);
+#endif
         if (steps_p1 > 0) {
             queuePumpSteps(steps_p1);
             g_state.cups_dispensed_today += cups_p1;
@@ -525,8 +548,10 @@ static void processDosingFromWaterMeter() {
     if (g_pump2_enabled) {
         float cups_p2 = delta_gallons * g_p2_eff_dose;
         long  steps_p2 = (long)roundf(cups_p2 * g_steps_per_cup_p2);
+#if ENCODER_DEBUG
         agentDebugLog("test_dosing_pump.cpp:processDosingFromWaterMeter",
                       "P2_steps", "D2", steps_p2);
+#endif
         if (steps_p2 > 0) {
             queue2PumpSteps(steps_p2);
             g_p2_cups_today += cups_p2;
@@ -1011,10 +1036,12 @@ static void encoderInit() {
     menuNav.setMenu(5, true);
     menuNav.setSelectedIndex(0);
 
+#if ENCODER_DEBUG
     agentDebugLog("test_dosing_pump.cpp:encoderInit",
                   "menuNav main menu",
                   "M0",
                   menuNav.getSelectedIndex());
+#endif
 }
 
 // Helper to centralize UI state transitions and menu configuration
@@ -1784,9 +1811,24 @@ void setup() {
     s_pulse_count = 0;
 
     printHelp();
+
+    // OTA in AP mode: start soft AP so laptop can connect and push firmware
+    WiFi.mode(WIFI_AP);
+    bool ap_ok = WiFi.softAP(OTA_AP_SSID, OTA_AP_PASS);
+    if (ap_ok) {
+        IPAddress ap_ip = WiFi.softAPIP();
+        Serial.printf("[OTA] AP started: SSID=%s IP=%s\n", OTA_AP_SSID, ap_ip.toString().c_str());
+        Serial.printf("[OTA] Connect laptop to AP, then: pio run -e test_dosing_pump -t upload --upload-port %s\n", ap_ip.toString().c_str());
+        ArduinoOTA.setHostname(OTA_HOSTNAME);
+        ArduinoOTA.begin();
+    } else {
+        Serial.println("[OTA] AP start failed — OTA disabled.");
+    }
 }
 
 void loop() {
+    ArduinoOTA.handle();
+
     // Give the stepper scheduler first chance each loop for smoother motion
     pumpUpdate();
 

@@ -62,11 +62,14 @@
 // ============================================================================
 // WATER METER INPUT
 // ============================================================================
-// 1 pulse per gallon contact closure input
+// 1 pulse per gallon contact closure input.
+// Validated for: 1 gallon at fastest every 3 min (min 180 s between pulses),
+// contact closed (LOW) for at least 10 s per pulse. Debounce/min-high allow
+// all such pulses; one count on first LOW edge, no double-count during 10 s.
 
 #define WATER_METER_PIN         GPIO_NUM_17   // WM1; has internal pull-up (was GPIO34)
 #define WATER_METER_2_PIN       GPIO_NUM_34   // WM2; input-only, no pull-up — external 10k required. Do NOT use GPIO19 (SD_CS).
-#define WATER_METER_DEBOUNCE_MS 45000         // Min ms between valid pulses; ≥1 pulse/min → use 45s to reject false triggers
+#define WATER_METER_DEBOUNCE_MS 45000         // Min ms between valid pulses; 45s < 180s min interval → all pulses accepted
 #define WATER_METER_MIN_HIGH_MS 1000          // Min ms pin must be HIGH (contact open) before a FALLING counts; rejects brief noise
 #define WATER_METER_PULSES_PER_GAL  1         // Pulses per gallon (configurable)
 
