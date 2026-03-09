@@ -17,7 +17,7 @@ MqttTelemetry mqttTelemetry;
 #define MQTT_RECONNECT_INITIAL_MS  5000
 #define MQTT_RECONNECT_MAX_MS      60000
 #define MQTT_KEEPALIVE_SEC         60
-#define MQTT_PAYLOAD_MAX           512
+#define MQTT_PAYLOAD_MAX           1024
 
 MqttTelemetry::MqttTelemetry()
     : _config(nullptr)
@@ -159,6 +159,13 @@ void MqttTelemetry::publishReading(const sensor_reading_t* reading) {
     if (!_config || !_config->use_mqtt_telemetry || !reading) return;
     char payload[MQTT_PAYLOAD_MAX];
     buildMetricsPayload(reading, payload, sizeof(payload));
+    
+    // Check for JSON truncation to prevent sending malformed payloads
+    if (strlen(payload) >= sizeof(payload) - 1) {
+        Serial.println("MQTT metrics payload truncated, skipping publish");
+        return;
+    }
+    
     if (publish("metrics", payload)) {
         /* published */
     }

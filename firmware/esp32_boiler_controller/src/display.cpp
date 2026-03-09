@@ -13,6 +13,7 @@
 #include "sensor_health.h"
 #include "self_test.h"
 #include "sd_logger.h"
+#include <Wire.h>
 #include <stdarg.h>
 
 // Global instance
@@ -70,6 +71,7 @@ static const uint8_t char_alarm[8] = {
 
 Display::Display()
     : _lcd(LCD_I2C_ADDR, LCD_COLS, LCD_ROWS)
+    , _initialized(false)
     , _current_screen(SCREEN_MAIN)
     , _last_update(0)
     , _message_end_time(0)
@@ -87,6 +89,13 @@ Display::Display()
 }
 
 bool Display::begin() {
+    // Probe I2C for LCD before touching it (avoid block/hang if display disconnected)
+    Wire.beginTransmission(LCD_I2C_ADDR);
+    if (Wire.endTransmission() != 0) {
+        Serial.println("Display: I2C LCD not found at 0x27 - display disabled");
+        return false;
+    }
+
     // Initialize LCD
     _lcd.init();
     _lcd.backlight();
@@ -120,11 +129,14 @@ bool Display::begin() {
     FastLED.clear();
     FastLED.show();
 
+    _initialized = true;
     Serial.println("Display initialized");
     return true;
 }
 
 void Display::update() {
+    if (!_initialized) return;
+
     uint32_t now = millis();
 
     // Check message timeout
@@ -199,6 +211,7 @@ void Display::update() {
 }
 
 void Display::setScreen(display_screen_t screen) {
+    if (!_initialized) return;
     if (screen < SCREEN_COUNT) {
         _current_screen = screen;
         _lcd.clear();
@@ -206,12 +219,14 @@ void Display::setScreen(display_screen_t screen) {
 }
 
 void Display::nextScreen() {
+    if (!_initialized) return;
     _sd_format_confirm = false;
     _current_screen = (display_screen_t)((_current_screen + 1) % SCREEN_COUNT);
     _lcd.clear();
 }
 
 void Display::prevScreen() {
+    if (!_initialized) return;
     _sd_format_confirm = false;
     if (_current_screen == 0) {
         _current_screen = (display_screen_t)(SCREEN_COUNT - 1);
@@ -226,6 +241,7 @@ display_screen_t Display::getScreen() {
 }
 
 void Display::showMessage(const char* line1, const char* line2, uint32_t duration_ms) {
+    if (!_initialized) return;
     _showing_message = true;
     _message_end_time = millis() + duration_ms;
 
@@ -250,6 +266,7 @@ void Display::showMessage(const char* line1, const char* line2, uint32_t duratio
 }
 
 void Display::showAlarm(const char* message) {
+    if (!_initialized) return;
     _alarm_active = true;
     strncpy(_alarm_message, message, 20);
     _alarm_message[20] = '\0';
@@ -339,14 +356,17 @@ void Display::printValue(uint8_t col, uint8_t row, float value,
 }
 
 void Display::clear() {
+    if (!_initialized) return;
     _lcd.clear();
 }
 
 void Display::setCursor(uint8_t col, uint8_t row) {
+    if (!_initialized) return;
     _lcd.setCursor(col, row);
 }
 
 void Display::print(const char* text) {
+    if (!_initialized) return;
     _lcd.print(text);
 }
 

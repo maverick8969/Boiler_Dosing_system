@@ -28,6 +28,7 @@ BoilerWebServer::BoilerWebServer()
     , _ws(WEB_WS_PATH)
     , _config(nullptr)
     , _fuzzy(nullptr)
+    , _config_mutex(nullptr)
     , _running(false)
     , _mqtt_connected(false)
     , _current_conductivity(0)
@@ -44,9 +45,10 @@ BoilerWebServer::BoilerWebServer()
 // INITIALIZATION
 // ============================================================================
 
-bool BoilerWebServer::begin(system_config_t* config, FuzzyController* fuzzy) {
+bool BoilerWebServer::begin(system_config_t* config, FuzzyController* fuzzy, SemaphoreHandle_t configMutex) {
     _config = config;
     _fuzzy = fuzzy;
+    _config_mutex = configMutex;
 
     _ws.onEvent([this](AsyncWebSocket* server, AsyncWebSocketClient* client, AwsEventType type, void* arg, uint8_t* data, size_t len) {
         this->onWsEvent(server, client, type, arg, data, len);
@@ -719,18 +721,27 @@ void BoilerWebServer::handlePostCommand(AsyncWebServerRequest* request) {
 void BoilerWebServer::handlePostConfig(AsyncWebServerRequest* request) {
     sendCORSHeaders(request);
 
+    if (!_config) {
+        request->send(500, "application/json", "{\"error\":\"Config not available\"}");
+        return;
+    }
     String body = request->arg("plain");
     if (!checkPostAuth(request, body)) {
         request->send(401, "application/json", "{\"error\":\"Authentication required\"}");
         return;
     }
-    if (body.length() == 0 || !_config) {
+    if (body.length() == 0) {
         request->send(400, "application/json", "{\"error\":\"JSON body required\"}");
         return;
     }
     JsonDocument doc;
     if (deserializeJson(doc, body) != DeserializationError::Ok) {
         request->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+        return;
+    }
+
+    if (_config_mutex != NULL && xSemaphoreTake(_config_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        request->send(503, "application/json", "{\"error\":\"Config busy\"}");
         return;
     }
     if (doc.containsKey("log_interval_ms")) {
@@ -765,6 +776,8 @@ void BoilerWebServer::handlePostConfig(AsyncWebServerRequest* request) {
         }
     }
     if (doc.containsKey("use_mqtt_telemetry")) _config->use_mqtt_telemetry = doc["use_mqtt_telemetry"].as<bool>();
+    if (_config_mutex != NULL) xSemaphoreGive(_config_mutex);
+
     saveConfiguration();
     request->send(200, "application/json", "{\"success\":true}");
     JsonDocument payload;

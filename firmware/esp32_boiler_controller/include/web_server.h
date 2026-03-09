@@ -13,6 +13,7 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include <freertos/semphr.h>
 #include "config.h"
 #include "fuzzy_logic.h"
 #include "device_manager.h"
@@ -46,8 +47,9 @@ public:
 
     /**
      * @brief Initialize async web server and WebSocket
+     * @param configMutex Optional mutex to protect config when POST /api/config updates it
      */
-    bool begin(system_config_t* config, FuzzyController* fuzzy);
+    bool begin(system_config_t* config, FuzzyController* fuzzy, SemaphoreHandle_t configMutex = NULL);
 
     /**
      * @brief Call from loop: cleanup closed WebSocket clients
@@ -83,6 +85,7 @@ private:
     AsyncWebSocket _ws;
     system_config_t* _config;
     FuzzyController* _fuzzy;
+    SemaphoreHandle_t _config_mutex;  // Protects _config when POST /api/config writes
     bool _running;
     bool _mqtt_connected;
 

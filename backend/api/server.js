@@ -48,6 +48,83 @@ const authenticateApiKey = (req, res, next) => {
   next();
 };
 
+// Validation helpers: ensure valid types and avoid Invalid Date / DB errors
+function parseTimestamp(ts) {
+  if (ts === undefined || ts === null) return new Date();
+  const n = Number(ts);
+  if (!Number.isFinite(n)) return null;
+  return new Date(n * 1000);
+}
+
+function isValidNumber(v) {
+  return v === undefined || v === null || (typeof v === 'number' && Number.isFinite(v));
+}
+
+function validateReading(body) {
+  if (!body || typeof body !== 'object') return { ok: false, error: 'Request body must be a JSON object' };
+  const time = parseTimestamp(body.timestamp);
+  if (time === null) return { ok: false, error: 'timestamp must be a finite number (Unix seconds) or omitted' };
+  if (!isValidNumber(body.conductivity)) return { ok: false, error: 'conductivity must be a number or omitted' };
+  if (!isValidNumber(body.temperature)) return { ok: false, error: 'temperature must be a number or omitted' };
+  if (!isValidNumber(body.water_meter1) && body.water_meter1 != null) return { ok: false, error: 'water_meter1 must be a number or omitted' };
+  if (!isValidNumber(body.water_meter2) && body.water_meter2 != null) return { ok: false, error: 'water_meter2 must be a number or omitted' };
+  if (!isValidNumber(body.flow_rate) && body.flow_rate != null) return { ok: false, error: 'flow_rate must be a number or omitted' };
+  if (!isValidNumber(body.active_alarms) && body.active_alarms != null) return { ok: false, error: 'active_alarms must be a number or omitted' };
+  return { ok: true, time };
+}
+
+function validatePumpEvent(body) {
+  if (!body || typeof body !== 'object') return { ok: false, error: 'Request body must be a JSON object' };
+  const time = parseTimestamp(body.timestamp);
+  if (time === null) return { ok: false, error: 'timestamp must be a finite number (Unix seconds) or omitted' };
+  if (typeof body.pump_id !== 'number' || !Number.isInteger(body.pump_id)) return { ok: false, error: 'pump_id must be an integer' };
+  if (!body.event_type || typeof body.event_type !== 'string') return { ok: false, error: 'event_type is required and must be a string' };
+  return { ok: true, time };
+}
+
+function validateBlowdownEvent(body) {
+  if (!body || typeof body !== 'object') return { ok: false, error: 'Request body must be a JSON object' };
+  const time = parseTimestamp(body.timestamp);
+  if (time === null) return { ok: false, error: 'timestamp must be a finite number (Unix seconds) or omitted' };
+  if (!body.event_type || typeof body.event_type !== 'string') return { ok: false, error: 'event_type is required and must be a string' };
+  return { ok: true, time };
+}
+
+function validateAlarm(body) {
+  if (!body || typeof body !== 'object') return { ok: false, error: 'Request body must be a JSON object' };
+  const time = parseTimestamp(body.timestamp);
+  if (time === null) return { ok: false, error: 'timestamp must be a finite number (Unix seconds) or omitted' };
+  if (typeof body.alarm_code !== 'number' || !Number.isInteger(body.alarm_code)) return { ok: false, error: 'alarm_code must be an integer' };
+  if (!body.state || typeof body.state !== 'string') return { ok: false, error: 'state is required and must be a string' };
+  return { ok: true, time };
+}
+
+function validateCalibration(body) {
+  if (!body || typeof body !== 'object') return { ok: false, error: 'Request body must be a JSON object' };
+  const time = parseTimestamp(body.timestamp);
+  if (time === null) return { ok: false, error: 'timestamp must be a finite number (Unix seconds) or omitted' };
+  if (!body.sensor_type || typeof body.sensor_type !== 'string') return { ok: false, error: 'sensor_type is required and must be a string' };
+  return { ok: true, time };
+}
+
+function validateConfigChange(body) {
+  if (!body || typeof body !== 'object') return { ok: false, error: 'Request body must be a JSON object' };
+  const time = parseTimestamp(body.timestamp);
+  if (time === null) return { ok: false, error: 'timestamp must be a finite number (Unix seconds) or omitted' };
+  if (!body.parameter || typeof body.parameter !== 'string') return { ok: false, error: 'parameter is required and must be a string' };
+  return { ok: true, time };
+}
+
+function validateSystemStatus(body) {
+  if (!body || typeof body !== 'object') return { ok: false, error: 'Request body must be a JSON object' };
+  const time = parseTimestamp(body.timestamp);
+  if (time === null) return { ok: false, error: 'timestamp must be a finite number (Unix seconds) or omitted' };
+  if (!isValidNumber(body.uptime_sec) && body.uptime_sec != null) return { ok: false, error: 'uptime_sec must be a number or omitted' };
+  if (!isValidNumber(body.free_heap) && body.free_heap != null) return { ok: false, error: 'free_heap must be a number or omitted' };
+  if (!isValidNumber(body.error_count) && body.error_count != null) return { ok: false, error: 'error_count must be a number or omitted' };
+  return { ok: true, time };
+}
+
 // Health check endpoint (no auth required)
 app.get('/health', async (req, res) => {
   try {
@@ -63,21 +140,21 @@ app.get('/health', async (req, res) => {
 // ============================================
 app.post('/api/readings', authenticateApiKey, async (req, res) => {
   try {
-    const {
-      timestamp,
-      conductivity,
-      temperature,
-      water_meter1,
-      water_meter2,
-      flow_rate,
-      blowdown_active,
-      pump1_active,
-      pump2_active,
-      pump3_active,
-      active_alarms
-    } = req.body;
+    const body = req.body;
+    const validated = validateReading(body);
+    if (!validated.ok) return res.status(400).json({ error: validated.error });
 
-    const time = timestamp ? new Date(timestamp * 1000) : new Date();
+    const time = validated.time;
+    const conductivity = body.conductivity != null && Number.isFinite(Number(body.conductivity)) ? Number(body.conductivity) : null;
+    const temperature = body.temperature != null && Number.isFinite(Number(body.temperature)) ? Number(body.temperature) : null;
+    const water_meter1 = body.water_meter1 != null && Number.isFinite(Number(body.water_meter1)) ? Math.round(Number(body.water_meter1)) : null;
+    const water_meter2 = body.water_meter2 != null && Number.isFinite(Number(body.water_meter2)) ? Math.round(Number(body.water_meter2)) : null;
+    const flow_rate = body.flow_rate != null && Number.isFinite(Number(body.flow_rate)) ? Number(body.flow_rate) : null;
+    const blowdown_active = Boolean(body.blowdown_active);
+    const pump1_active = Boolean(body.pump1_active);
+    const pump2_active = Boolean(body.pump2_active);
+    const pump3_active = Boolean(body.pump3_active);
+    const active_alarms = body.active_alarms != null && Number.isFinite(Number(body.active_alarms)) ? Math.round(Number(body.active_alarms)) : 0;
 
     await pool.query(`
       INSERT INTO sensor_readings
@@ -105,19 +182,35 @@ app.post('/api/readings/batch', authenticateApiKey, async (req, res) => {
       return res.status(400).json({ error: 'readings must be an array' });
     }
 
+    for (let i = 0; i < readings.length; i++) {
+      const v = validateReading(readings[i]);
+      if (!v.ok) return res.status(400).json({ error: `readings[${i}]: ${v.error}` });
+    }
+
     await client.query('BEGIN');
 
     for (const r of readings) {
-      const time = r.timestamp ? new Date(r.timestamp * 1000) : new Date();
+      const time = parseTimestamp(r.timestamp);
+      const conductivity = r.conductivity != null && Number.isFinite(Number(r.conductivity)) ? Number(r.conductivity) : null;
+      const temperature = r.temperature != null && Number.isFinite(Number(r.temperature)) ? Number(r.temperature) : null;
+      const water_meter1 = r.water_meter1 != null && Number.isFinite(Number(r.water_meter1)) ? Math.round(Number(r.water_meter1)) : null;
+      const water_meter2 = r.water_meter2 != null && Number.isFinite(Number(r.water_meter2)) ? Math.round(Number(r.water_meter2)) : null;
+      const flow_rate = r.flow_rate != null && Number.isFinite(Number(r.flow_rate)) ? Number(r.flow_rate) : null;
+      const blowdown_active = Boolean(r.blowdown_active);
+      const pump1_active = Boolean(r.pump1_active);
+      const pump2_active = Boolean(r.pump2_active);
+      const pump3_active = Boolean(r.pump3_active);
+      const active_alarms = r.active_alarms != null && Number.isFinite(Number(r.active_alarms)) ? Math.round(Number(r.active_alarms)) : 0;
+
       await client.query(`
         INSERT INTO sensor_readings
         (time, conductivity, temperature, water_meter1, water_meter2,
          flow_rate, blowdown_active, pump1_active, pump2_active,
          pump3_active, active_alarms)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-      `, [time, r.conductivity, r.temperature, r.water_meter1, r.water_meter2,
-          r.flow_rate, r.blowdown_active, r.pump1_active, r.pump2_active,
-          r.pump3_active, r.active_alarms]);
+      `, [time, conductivity, temperature, water_meter1, water_meter2,
+          flow_rate, blowdown_active, pump1_active, pump2_active,
+          pump3_active, active_alarms]);
     }
 
     await client.query('COMMIT');
@@ -146,16 +239,22 @@ app.get('/api/readings/latest', async (req, res) => {
 // Get readings for time range
 app.get('/api/readings', async (req, res) => {
   try {
-    const { start, end, limit = 1000 } = req.query;
-    const startTime = start ? new Date(start) : new Date(Date.now() - 24 * 60 * 60 * 1000);
-    const endTime = end ? new Date(end) : new Date();
+    // Clamp limit to 1-10000 to prevent database overload
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 1000, 1), 10000);
+    const startTime = req.query.start ? new Date(req.query.start) : new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const endTime = req.query.end ? new Date(req.query.end) : new Date();
+
+    // Reject invalid date strings to prevent DB query errors
+    if (isNaN(startTime.getTime()) || isNaN(endTime.getTime())) {
+      return res.status(400).json({ error: 'Invalid start or end date' });
+    }
 
     const result = await pool.query(`
       SELECT * FROM sensor_readings
       WHERE time BETWEEN $1 AND $2
       ORDER BY time DESC
       LIMIT $3
-    `, [startTime, endTime, Math.min(limit, 10000)]);
+    `, [startTime, endTime, limit]);
 
     res.json(result.rows);
   } catch (err) {
@@ -168,24 +267,23 @@ app.get('/api/readings', async (req, res) => {
 // ============================================
 app.post('/api/events/pump', authenticateApiKey, async (req, res) => {
   try {
-    const {
-      timestamp,
-      pump_id,
-      pump_name,
-      event_type,
-      duration_ms,
-      volume_ml,
-      trigger_source,
-      feed_mode
-    } = req.body;
+    const validated = validatePumpEvent(req.body);
+    if (!validated.ok) return res.status(400).json({ error: validated.error });
 
-    const time = timestamp ? new Date(timestamp * 1000) : new Date();
+    const { pump_id, pump_name, event_type, duration_ms, volume_ml, trigger_source, feed_mode } = req.body;
+    const time = validated.time;
+
+    const pName = typeof pump_name === 'string' ? pump_name : null;
+    const durMs = isValidNumber(duration_ms) ? Math.round(duration_ms) : null;
+    const vMl = isValidNumber(volume_ml) ? volume_ml : null;
+    const tSrc = typeof trigger_source === 'string' ? trigger_source : null;
+    const fMode = typeof feed_mode === 'string' ? feed_mode : null;
 
     await pool.query(`
       INSERT INTO pump_events
       (time, pump_id, pump_name, event_type, duration_ms, volume_ml, trigger_source, feed_mode)
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-    `, [time, pump_id, pump_name, event_type, duration_ms, volume_ml, trigger_source, feed_mode]);
+    `, [time, pump_id, pName, event_type, durMs, vMl, tSrc, fMode]);
 
     res.status(201).json({ success: true });
   } catch (err) {
@@ -199,18 +297,11 @@ app.post('/api/events/pump', authenticateApiKey, async (req, res) => {
 // ============================================
 app.post('/api/events/blowdown', authenticateApiKey, async (req, res) => {
   try {
-    const {
-      timestamp,
-      event_type,
-      duration_sec,
-      start_conductivity,
-      end_conductivity,
-      water_volume_gal,
-      trigger_source,
-      sampling_mode
-    } = req.body;
+    const validated = validateBlowdownEvent(req.body);
+    if (!validated.ok) return res.status(400).json({ error: validated.error });
 
-    const time = timestamp ? new Date(timestamp * 1000) : new Date();
+    const { event_type, duration_sec, start_conductivity, end_conductivity, water_volume_gal, trigger_source, sampling_mode } = req.body;
+    const time = validated.time;
 
     await pool.query(`
       INSERT INTO blowdown_events
@@ -232,18 +323,11 @@ app.post('/api/events/blowdown', authenticateApiKey, async (req, res) => {
 // ============================================
 app.post('/api/alarms', authenticateApiKey, async (req, res) => {
   try {
-    const {
-      timestamp,
-      alarm_code,
-      alarm_name,
-      severity,
-      state,
-      value,
-      setpoint,
-      message
-    } = req.body;
+    const validated = validateAlarm(req.body);
+    if (!validated.ok) return res.status(400).json({ error: validated.error });
 
-    const time = timestamp ? new Date(timestamp * 1000) : new Date();
+    const { alarm_code, alarm_name, severity, state, value, setpoint, message } = req.body;
+    const time = validated.time;
 
     await pool.query(`
       INSERT INTO alarms
@@ -275,8 +359,10 @@ app.get('/api/alarms/active', async (req, res) => {
 // ============================================
 app.post('/api/calibration', authenticateApiKey, async (req, res) => {
   try {
+    const validated = validateCalibration(req.body);
+    if (!validated.ok) return res.status(400).json({ error: validated.error });
+
     const {
-      timestamp,
       sensor_type,
       cal_point,
       reference_value,
@@ -286,15 +372,20 @@ app.post('/api/calibration', authenticateApiKey, async (req, res) => {
       technician
     } = req.body;
 
-    const time = timestamp ? new Date(timestamp * 1000) : new Date();
+    const time = validated.time;
+    const cPoint = isValidNumber(cal_point) ? cal_point : null;
+    const rValue = isValidNumber(reference_value) ? reference_value : null;
+    const mRaw = isValidNumber(measured_raw) ? measured_raw : null;
+    const pFactor = isValidNumber(previous_factor) ? previous_factor : null;
+    const nFactor = isValidNumber(new_factor) ? new_factor : null;
 
     await pool.query(`
       INSERT INTO calibration_log
       (time, sensor_type, cal_point, reference_value, measured_raw,
        previous_factor, new_factor, technician)
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-    `, [time, sensor_type, cal_point, reference_value, measured_raw,
-        previous_factor, new_factor, technician]);
+    `, [time, sensor_type, cPoint, rValue, mRaw,
+        pFactor, nFactor, technician]);
 
     res.status(201).json({ success: true });
   } catch (err) {
@@ -308,8 +399,11 @@ app.post('/api/calibration', authenticateApiKey, async (req, res) => {
 // ============================================
 app.post('/api/config', authenticateApiKey, async (req, res) => {
   try {
-    const { timestamp, parameter, old_value, new_value, source } = req.body;
-    const time = timestamp ? new Date(timestamp * 1000) : new Date();
+    const validated = validateConfigChange(req.body);
+    if (!validated.ok) return res.status(400).json({ error: validated.error });
+
+    const { parameter, old_value, new_value, source } = req.body;
+    const time = validated.time;
 
     await pool.query(`
       INSERT INTO config_changes (time, parameter, old_value, new_value, source)
@@ -328,8 +422,10 @@ app.post('/api/config', authenticateApiKey, async (req, res) => {
 // ============================================
 app.post('/api/system/status', authenticateApiKey, async (req, res) => {
   try {
+    const validated = validateSystemStatus(req.body);
+    if (!validated.ok) return res.status(400).json({ error: validated.error });
+
     const {
-      timestamp,
       uptime_sec,
       free_heap,
       wifi_rssi,
@@ -338,13 +434,19 @@ app.post('/api/system/status', authenticateApiKey, async (req, res) => {
       error_count
     } = req.body;
 
-    const time = timestamp ? new Date(timestamp * 1000) : new Date();
+    const time = validated.time;
+    const uptime = isValidNumber(uptime_sec) ? Math.round(uptime_sec) : null;
+    const heap = isValidNumber(free_heap) ? Math.round(free_heap) : null;
+    const rssi = isValidNumber(wifi_rssi) ? Math.round(wifi_rssi) : null;
+    const temp = isValidNumber(cpu_temp) ? cpu_temp : null;
+    const nvs = isValidNumber(nvs_free_entries) ? Math.round(nvs_free_entries) : null;
+    const errCount = isValidNumber(error_count) ? Math.round(error_count) : null;
 
     await pool.query(`
       INSERT INTO system_status
       (time, uptime_sec, free_heap, wifi_rssi, cpu_temp, nvs_free_entries, error_count)
       VALUES ($1, $2, $3, $4, $5, $6, $7)
-    `, [time, uptime_sec, free_heap, wifi_rssi, cpu_temp, nvs_free_entries, error_count]);
+    `, [time, uptime, heap, rssi, temp, nvs, errCount]);
 
     res.status(201).json({ success: true });
   } catch (err) {
@@ -367,12 +469,13 @@ app.get('/api/stats/today', async (req, res) => {
 
 app.get('/api/stats/hourly', async (req, res) => {
   try {
-    const { hours = 24 } = req.query;
+    // Parse and clamp interval to prevent SQL injection and invalid intervals
+    const hours = Math.min(Math.max(parseInt(req.query.hours, 10) || 24, 1), 168);
     const result = await pool.query(`
       SELECT * FROM sensor_readings_hourly
-      WHERE bucket > NOW() - INTERVAL '${Math.min(hours, 168)} hours'
+      WHERE bucket > NOW() - INTERVAL '1 hour' * $1
       ORDER BY bucket DESC
-    `);
+    `, [hours]);
     res.json(result.rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -381,12 +484,13 @@ app.get('/api/stats/hourly', async (req, res) => {
 
 app.get('/api/stats/daily', async (req, res) => {
   try {
-    const { days = 30 } = req.query;
+    // Parse and clamp interval to prevent SQL injection and invalid intervals
+    const days = Math.min(Math.max(parseInt(req.query.days, 10) || 30, 1), 365);
     const result = await pool.query(`
       SELECT * FROM sensor_readings_daily
-      WHERE bucket > NOW() - INTERVAL '${Math.min(days, 365)} days'
+      WHERE bucket > NOW() - INTERVAL '1 day' * $1
       ORDER BY bucket DESC
-    `);
+    `, [days]);
     res.json(result.rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -409,7 +513,7 @@ function deviceIdFromTopic(topic) {
 
 function metricValue(metrics, id, defaultVal = null) {
   const m = (metrics || []).find((x) => x.id === id);
-  return m != null && typeof m.value === 'number' ? m.value : defaultVal;
+  return m != null && typeof m.value === 'number' && Number.isFinite(m.value) ? m.value : defaultVal;
 }
 
 function startMqttGateway() {
@@ -436,7 +540,7 @@ function startMqttGateway() {
     const suffix = topic.split('/').pop();
     try {
       if (suffix === 'metrics') {
-        const time = doc.timestamp ? new Date(doc.timestamp * 1000) : new Date();
+        const time = parseTimestamp(doc.timestamp) || new Date();
         const metrics = doc.metrics || [];
         await pool.query(
           `INSERT INTO sensor_readings
@@ -459,7 +563,7 @@ function startMqttGateway() {
           ]
         );
       } else if (suffix === 'alarm') {
-        const time = doc.timestamp ? new Date(doc.timestamp * 1000) : new Date();
+        const time = parseTimestamp(doc.timestamp) || new Date();
         if (doc.type === 'alarm') {
           const state = doc.active ? 'active' : 'cleared';
           await pool.query(
@@ -468,31 +572,31 @@ function startMqttGateway() {
             [
               time,
               deviceId,
-              doc.alarm_code ?? 0,
-              doc.alarm_name || '',
+              isValidNumber(doc.alarm_code) ? Math.round(doc.alarm_code) : 0,
+              typeof doc.alarm_name === 'string' ? doc.alarm_name.substring(0, 64) : '',
               state,
-              doc.trigger_value ?? null,
+              isValidNumber(doc.trigger_value) ? doc.trigger_value : null,
             ]
           );
         } else if (doc.type === 'event') {
           await pool.query(
             `INSERT INTO pump_events (time, device_id, pump_id, event_type)
              VALUES ($1, $2, $3, $4)`,
-            [time, deviceId, 0, doc.event_type || 'event']
+            [time, deviceId, 0, typeof doc.event_type === 'string' ? doc.event_type.substring(0, 16) : 'event']
           );
         }
       } else if (suffix === 'health') {
         if (payload.toString() === 'offline') return; // LWT, no insert
-        const time = doc.timestamp ? new Date(doc.timestamp * 1000) : new Date();
+        const time = parseTimestamp(doc.timestamp) || new Date();
         await pool.query(
           `INSERT INTO system_status (time, device_id, uptime_sec, free_heap, error_count)
            VALUES ($1, $2, $3, $4, $5)`,
           [
             time,
             deviceId,
-            doc.uptime_sec ?? null,
-            doc.free_heap ?? null,
-            doc.active_alarms ?? 0,
+            isValidNumber(doc.uptime_sec) ? Math.round(doc.uptime_sec) : null,
+            isValidNumber(doc.free_heap) ? Math.round(doc.free_heap) : null,
+            isValidNumber(doc.error_count) ? Math.round(doc.error_count) : null,
           ]
         );
       }

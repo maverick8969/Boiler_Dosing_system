@@ -217,6 +217,7 @@ public:
 private:
     LiquidCrystal_I2C _lcd;
     CRGB _leds[WS2812_NUM_LEDS];
+    bool _initialized;  // false until begin() succeeds (I2C LCD present)
 
     display_screen_t _current_screen;
     uint32_t _last_update;

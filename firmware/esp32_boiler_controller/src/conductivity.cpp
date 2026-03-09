@@ -258,6 +258,11 @@ float ConductivitySensor::readTemperature() {
     float rtdNominal = (_config) ? _config->rtd_nominal : RTD_NOMINAL_RESISTANCE;
     float rtdRef = (_config) ? _config->rtd_reference : RTD_REFERENCE_RESISTOR;
 
+    // Prevent division by zero or faults in MAX31865 library if config is invalid
+    if (rtdRef <= 0.0f) {
+        rtdRef = RTD_REFERENCE_RESISTOR;
+    }
+
     float temp = _rtd->temperature(rtdNominal, rtdRef);
 
     // Check for RTD faults

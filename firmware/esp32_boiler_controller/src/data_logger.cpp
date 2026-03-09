@@ -155,6 +155,7 @@ void DataLogger::logReading(sensor_reading_t* reading) {
     bufferReading(reading);
 }
 
+// When WiFi is down, events are not buffered (only readings are). Events are lost until STA reconnects.
 void DataLogger::logEvent(const char* event_type, const char* description, int32_t value) {
     if (!_enabled) return;
 
@@ -177,6 +178,7 @@ void DataLogger::logEvent(const char* event_type, const char* description, int32
     Serial.printf("Event: %s - %s (%d)\n", event_type, description, value);
 }
 
+// When WiFi is down, alarms are not buffered (only readings are). Alarms are lost until STA reconnects.
 void DataLogger::logAlarm(uint16_t alarm_code, const char* alarm_name,
                           bool active, float trigger_value) {
     if (!_enabled) return;
@@ -314,9 +316,13 @@ bool DataLogger::uploadReading(sensor_reading_t* reading) {
         _http.addHeader("X-API-Key", _config->api_key);
     }
 
-    _last_http_status = _http.POST(json);
+    // RAII helper to ensure HTTP client is closed even if POST fails or throws
+    struct HttpCleanup {
+        HTTPClient& http;
+        ~HttpCleanup() { http.end(); }
+    } cleanup{_http};
 
-    _http.end();
+    _last_http_status = _http.POST(json);
 
     if (_last_http_status == 200 || _last_http_status == 201) {
         return true;
@@ -341,9 +347,13 @@ bool DataLogger::uploadEvent(event_log_t* event) {
         _http.addHeader("X-API-Key", _config->api_key);
     }
 
-    _last_http_status = _http.POST(json);
+    // RAII helper to ensure HTTP client is closed even if POST fails or throws
+    struct HttpCleanup {
+        HTTPClient& http;
+        ~HttpCleanup() { http.end(); }
+    } cleanup{_http};
 
-    _http.end();
+    _last_http_status = _http.POST(json);
 
     return (_last_http_status == 200 || _last_http_status == 201);
 }
@@ -363,9 +373,13 @@ bool DataLogger::uploadAlarm(alarm_log_t* alarm) {
         _http.addHeader("X-API-Key", _config->api_key);
     }
 
-    _last_http_status = _http.POST(json);
+    // RAII helper to ensure HTTP client is closed even if POST fails or throws
+    struct HttpCleanup {
+        HTTPClient& http;
+        ~HttpCleanup() { http.end(); }
+    } cleanup{_http};
 
-    _http.end();
+    _last_http_status = _http.POST(json);
 
     return (_last_http_status == 200 || _last_http_status == 201);
 }
@@ -398,6 +412,7 @@ bool DataLogger::uploadBuffered() {
     return false;
 }
 
+// Build JSON with only fields the backend API/DB store (contract alignment)
 String DataLogger::buildReadingJSON(sensor_reading_t* reading) {
     JsonDocument doc;
 
@@ -408,23 +423,10 @@ String DataLogger::buildReadingJSON(sensor_reading_t* reading) {
     doc["water_meter2"] = reading->water_meter2;
     doc["flow_rate"] = reading->flow_rate;
     doc["blowdown_active"] = reading->blowdown_active;
-    doc["valve_position_mA"] = reading->valve_position_mA;
     doc["pump1_active"] = reading->pump1_active;
     doc["pump2_active"] = reading->pump2_active;
     doc["pump3_active"] = reading->pump3_active;
-    doc["feedwater_pump_on"] = reading->feedwater_pump_on;
-    doc["fw_pump_cycle_count"] = reading->fw_pump_cycle_count;
-    doc["fw_pump_on_time_sec"] = reading->fw_pump_on_time_sec;
     doc["active_alarms"] = reading->active_alarms;
-
-    // Health & diagnostics
-    doc["safe_mode"] = reading->safe_mode;
-    doc["cond_sensor_valid"] = reading->cond_sensor_valid;
-    doc["temp_sensor_valid"] = reading->temp_sensor_valid;
-    doc["devices_operational"] = reading->devices_operational;
-    doc["devices_faulted"] = reading->devices_faulted;
-    doc["devices_faulted_mask"] = reading->devices_faulted_mask;
-    doc["measurement_age_ms"] = reading->measurement_age_ms;
 
     String output;
     serializeJson(doc, output);
@@ -478,23 +480,16 @@ void DataLogger::handleWiFiEvents() {
     }
 
     if (!_wifi_connected && _config && strlen(_config->wifi_ssid) > 0) {
-        // Try to reconnect STA without disrupting AP
-        if (now - reconnect_time >= WIFI_RECONNECT_DELAY_MS) {
+        // Try to reconnect STA without disrupting AP in a non-blocking way
+        // to avoid stalling the telemetry loops and web UI for 10 seconds.
+        if (connected) {
+            _wifi_connected = true;
+            Serial.printf("STA reconnected: %s\n", WiFi.localIP().toString().c_str());
+            syncTime();
+        } else if (now - reconnect_time >= WIFI_RECONNECT_DELAY_MS) {
             Serial.println("Attempting STA reconnection...");
             WiFi.begin(_config->wifi_ssid, _config->wifi_password);
-
-            uint32_t start = millis();
-            while (WiFi.status() != WL_CONNECTED && (millis() - start < 10000)) {
-                delay(250);
-            }
-
-            if (WiFi.status() == WL_CONNECTED) {
-                _wifi_connected = true;
-                Serial.printf("STA reconnected: %s\n", WiFi.localIP().toString().c_str());
-                syncTime();
-            } else {
-                reconnect_time = now;
-            }
+            reconnect_time = now; // wait another cycle before retrying begin()
         }
     }
 }

@@ -389,6 +389,12 @@ void ChemicalPump::processModeB(bool blowdown_active, uint32_t blowdown_time_ms)
 void ChemicalPump::processModeC() {
     // Mode C: Continuous duty cycle (% of time)
 
+    // Prevent division by zero and infinite cycling if not configured
+    if (_config->cycle_time_seconds == 0) {
+        if (_status.running) stop();
+        return;
+    }
+
     if (_mode_c_cycle_start == 0) {
         _mode_c_cycle_start = millis();
     }
