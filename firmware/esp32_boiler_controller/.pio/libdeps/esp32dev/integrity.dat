@@ -1,0 +1,9 @@
+bblanchon/ArduinoJson@^7.0.0
+marcoschwartz/LiquidCrystal_I2C@^1.1.4
+me-no-dev/AsyncTCP@^1.1.1
+knolleary/PubSubClient@^2.8
+waspinator/AccelStepper@^1.64
+adafruit/Adafruit MAX31865 library@^1.6.2
+fastled/FastLED@^3.6.0
+arduino-libraries/NTPClient@^3.2.1
+me-no-dev/ESP Async WebServer@^1.2.3

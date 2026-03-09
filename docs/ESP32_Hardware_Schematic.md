@@ -2,6 +2,10 @@
 
 ## System Overview
 
+### Standalone (single ESP32)
+
+All sensors and blowdown are on the main ESP32. This is the default configuration.
+
 ```
  ┌─────────────────────────────────────────────────────────────────────────────┐
  │                        24 VDC POWER SUPPLY                                 │
@@ -19,9 +23,7 @@
         │         └────┬────┘            │
         │              │                 │
  ┌──────┴──────────────┴─────────────────┴────────────────────────────────────┐
- │                                                                            │
  │                        ESP32 DevKit V1 (38-pin)                            │
- │                                                                            │
  │   STEPPER          SENSORS           COMMS          ACTUATOR       UI      │
  │   MOTORS           & ADC             & LED          CONTROL               │
  │   ───────          ──────            ─────          ────────       ──      │
@@ -33,6 +35,41 @@
  │                    FW Pump Monitor                                        │
  └────────────────────────────────────────────────────────────────────────────┘
 ```
+
+### With coprocessor (ESP32 DevKit at boiler panel)
+
+Main ESP32 talks to the boiler-panel coprocessor over RS-485. The coprocessor (ESP32 DevKit) hosts conductivity/temperature sensing and blowdown (and optional solenoid); the main runs fuzzy logic, pump control, logging, and UI using coprocessor telemetry and by sending commands.
+
+```
+ ┌─────────────────────────────────────────────────────────────────────────────────┐
+ │                          24 VDC POWER SUPPLY                                   │
+ └──────┬────────────────┬──────────────────┬────────────────┬───────────────────┘
+        │                 │                  │                │
+        │            ┌────┴────┐      ┌──────┴──────┐   ┌─────┴────────────┐
+        │            │ 5V Buck │      │  Main ESP32 │   │ ESP32 DevKit      │
+        │            │Converter│      │  RS-485     │   │ (boiler panel)    │
+        │            └────┬────┘      │  DE/RE*     │   │ EZO-EC, MAX31865  │
+        │                 │           └──────┬───────┘   │ Blowdown relay   │
+        │            ┌────┴────┐            │          │ 4-20mA + CT: ADC  │
+        │            │  3.3V   │            │ RS-485   │ Solenoid relay    │
+        │            │  LDO    │            │ A/B/GND  │ (auto-direction)  │
+        │            └────┬────┘            │          └────────┬─────────┘
+        │                 │                 │                   │
+ ┌──────┴─────────────────┴─────────────────┴───────────────────┴─────────────────┐
+ │  ESP32 DevKit V1 (38-pin)                    │  ESP32 DevKit (boiler panel)     │
+ │  STEPPER │ COMMS/LED │ UI   │ RS-485 (Ser2)  │  Telemetry → Main                │
+ │  3x A4988│ I2C+WS2812│ LCD  │ GPIO25/36+DE_RE│  Commands ← Main (open/close)    │
+ │  Pumps   │ WiFi :80  │ Enc  │               │  Relays: blowdown, solenoid      │
+ └─────────────────────────────────────────────────────────────────────────────────┘
+ * Main board DE/RE; panel uses auto-direction RS-485 (no DE pin).
+```
+
+### System variants
+
+| Variant | Description |
+|--------|-------------|
+| **Standalone** | All sensors (EZO-EC, MAX31865, ADS1115) and blowdown relay on main ESP32. Single enclosure. |
+| **Coprocessor (ESP32 DevKit)** | Main ESP32 connects to a second ESP32 DevKit at the boiler panel via half-duplex RS-485 (panel uses auto-direction transceiver, no DE pin). Panel hosts conductivity/temperature sensing and blowdown (and optional solenoid). Main uses telemetry for fuzzy logic and sends blowdown/solenoid commands. See [Coprocessor_Communication_Logic.md](Coprocessor_Communication_Logic.md). |
 
 ---
 
@@ -100,15 +137,17 @@
 | **21** | I2C SDA | I/O | LCD (0x27) + ADS1115 (0x48) | I2C | 4.7k pull-up to 3.3V. 400 kHz Fast Mode. |
 | **22** | I2C SCL | OUT | LCD (0x27) + ADS1115 (0x48) | I2C | 4.7k pull-up to 3.3V. |
 | **23** | VSPI MOSI | OUT | MAX31865 + SD card | VSPI | Shared SPI data out. |
-| **25** | EZO-EC UART TX | OUT | Atlas EZO-EC RX | UART2 | 9600 baud. ESP32 TX → EZO RX. |
+| **25** | EZO-EC UART TX / RS-485 TX | OUT | Atlas EZO-EC RX (standalone) or RS-485 DI (coprocessor) | UART2 | Standalone: 9600 baud to EZO. Coprocessor: 115200 baud to RS-485 transceiver. |
 | **26** | Stepper 2 DIR (NaOH) | OUT | A4988 #2 DIR | — | |
 | **27** | Stepper 2 STEP (NaOH) | OUT | A4988 #2 STEP | — | |
 | **32** | Stepper 3 DIR (Amine) | OUT | A4988 #3 DIR | — | |
 | **33** | Stepper 3 STEP (Amine) | OUT | A4988 #3 STEP | — | |
 | **34** | Water Meter Pulse | IN | Contact closure (1 pulse/gal) | — | Input-only. External 10k pull-up to 3.3V required. Interrupt-driven. |
 | **35** | Feedwater Pump Monitor | IN | PC817 optocoupler output | — | Input-only. External 10k pull-up to 3.3V. Active LOW (pump ON). |
-| **36** | EZO-EC UART RX | IN | Atlas EZO-EC TX | UART2 | Input-only. ESP32 RX ← EZO TX. |
+| **36** | EZO-EC UART RX | IN | Atlas EZO-EC TX | UART2 | Input-only. ESP32 RX ← EZO TX. **Coprocessor variant:** RS-485 RX (from transceiver RO). |
 | **39** | MAX31865 MISO / SD MISO | IN | Adafruit MAX31865 + SD card | VSPI | Input-only. Shared VSPI MISO. |
+
+**Coprocessor variant:** When the coprocessor link is used, Serial2 is repurposed for RS-485: GPIO25 = RS-485 TX (to transceiver DI), GPIO36 = RS-485 RX (from transceiver RO). A DE/RE pin is required on the **main** board for half-duplex: drive HIGH when transmitting, LOW when receiving. Recommended DE/RE GPIO: **GPIO17** if AUX input (drum level) is not used; otherwise set per board in `pin_definitions.h`. The **Atlas EZO-EC** is on the **boiler panel** coprocessor (ESP32 DevKit), connected via Serial1 (GPIO9 RX, GPIO10 TX, 9600 baud); MAX31865 may also be on the panel if pins allow, or temperature is sent as fixed/default.
 
 > **Note:** GPIO19 was previously unassigned. It now serves as the SD card chip select
 > on the shared VSPI bus (MOSI=23, MISO=39, SCK=18). GPIO23 and GPIO18 are shared
@@ -121,6 +160,8 @@
 | 1 (TX0) | USB Serial TX — do not use |
 | 3 (RX0) | USB Serial RX — do not use |
 | 6–11 | Internal SPI flash — do not use |
+
+When the coprocessor link is used, GPIO25 and GPIO36 are dedicated to RS-485 on the main board. EZO-EC (and optionally MAX31865) are on the C3 board; the main receives conductivity and temperature only via C3 telemetry.
 
 ---
 
@@ -603,6 +644,146 @@ A FreeRTOS mutex (`spiMutex`) ensures only one device uses the bus at a time.
 
 ---
 
+### 12. RS-485 Transceiver (main board, coprocessor variant)
+
+When the ESP32 DevKit coprocessor is used, the main ESP32 connects via half-duplex RS-485. Serial2 (GPIO25 = TX, GPIO36 = RX) drives a transceiver on the main board; DE and /RE are tied together and driven by one GPIO (e.g. GPIO17). The panel coprocessor uses an auto-direction RS-485 module (no DE pin).
+
+```
+    ESP32                    MAX485 (or equivalent)              Twisted pair
+   ┌──────┐                  ┌─────────────────────┐             A/B + GND
+   │GPIO25├── TX ───────────→┤ DI                  │
+   │      │                  │         RO ─────────┼────────────→ GPIO36 (RX)
+   │      │                  │         DE ──┬──────┤
+   │      │                  │        /RE ───┘      │
+   │DE_RE ├──────────────────→┤ (DE and /RE tied)   │
+   │(e.g. │                  │         A ───────────┼────────────→ RS-485 A
+   │GPIO17)                  │         B ───────────┼────────────→ RS-485 B
+   │      │                  │       GND ───────────┼────────────→ GND
+   └──────┘                  └─────────────────────┘
+
+    DE/RE: HIGH = drive bus (TX); LOW = receive (RX).
+    After each TX, wait 1–2 character times (~2 ms at 115200) before reading.
+```
+
+| Parameter | Value |
+|-----------|-------|
+| Baud rate | 115200 |
+| Format | 8N1 |
+| Turn-around | 1–2 character times after TX before RX (see [Coprocessor_Communication_Logic.md](Coprocessor_Communication_Logic.md)) |
+
+---
+
+### 13. ESP32 DevKit boiler panel (coprocessor)
+
+When the coprocessor topology is used, an **ESP32 DevKit** (esp32dev) sits at the boiler panel. It runs RS-485 to the main ESP32 (auto-direction transceiver — **no DE pin**), drives blowdown and optional solenoid relays, reads 4–20 mA valve feedback and two CT channels via its **internal ADC** (GPIO36 valve, GPIO39/34 CTs; 150 Ω sense for valve), and hosts the **Atlas Scientific EZO-EC** on **Serial1** (GPIO9 RX, GPIO10 TX). The main ESP32 receives conductivity (and temperature) only via coprocessor telemetry over RS-485. See `include/c3_pin_definitions.h` and `test_programs/README.md`.
+
+**Block diagram:**
+
+```
+    5V or 3.3V ──────────────────────────→ ESP32 DevKit VIN/3V3
+    GND (shared with main) ──────────────→ ESP32 DevKit GND
+
+    RS-485 A/B/GND (from main transceiver) → Auto-direction RS-485 module (no DE); Serial2 RX=GPIO16, TX=GPIO17
+    GPIO4  → Blowdown relay module
+    GPIO15 → Solenoid relay module (optional)
+    GPIO36 → 4–20 mA valve feedback (internal ADC, 150 Ω sense)
+    GPIO39 → Boiler power CT (internal ADC, DC bias + software RMS)
+    GPIO34 → Low water CT (internal ADC, DC bias + software RMS)
+    GPIO10 (Serial1 TX) → EZO-EC RX; GPIO9 (Serial1 RX) ← EZO-EC TX; 9600 baud
+```
+
+**Pin map (ESP32 DevKit):**
+
+| GPIO | Function |
+|------|----------|
+| 4 | Blowdown relay |
+| 5 | MAX31865 CS (VSPI) |
+| 9 | EZO-EC RX (Serial1) |
+| 10 | EZO-EC TX (Serial1) |
+| 15 | Solenoid relay |
+| 16 | RS-485 RX (Serial2) |
+| 17 | RS-485 TX (Serial2) |
+| 18 | MAX31865 SCK (VSPI) |
+| 19 | MAX31865 MISO (VSPI) |
+| 23 | MAX31865 MOSI (VSPI) |
+| 34 | ADC1 — low water CT (DC bias) |
+| 36 | ADC1 — 4–20 mA valve feedback |
+| 39 | ADC1 — boiler power CT (DC bias) |
+| — | RS-485 DE/RE = not used (auto-direction) |
+
+**Internal ADC (no ADS1115):** Valve 4–20 mA is read on **GPIO36** (ADC1_CH0) via 150 Ω sense resistor (0.6–3.0 V). **GPIO39** and **GPIO34** are used for the two SCT-013-005 CT channels with DC bias + software RMS (see Section 13a). Valve feedback is used in telemetry; CTs can be used for boiler-on and low-water detection in firmware.
+
+**Atlas EZO-EC:** The conductivity board is at the boiler panel. Connect EZO-EC RX to **GPIO10** (Serial1 TX), EZO-EC TX to **GPIO9** (Serial1 RX); 9600 baud, CR-terminated commands. Firmware uses HardwareSerial (Serial1). Temperature in telemetry may be fixed (e.g. 25°C) unless an RTD or DS18B20 is added.
+
+**Power:** Supply the panel from 5V or 3.3V; connect GND to main and RS-485 GND.
+
+### 13a. SCT-013-005 current transformers with internal ADC — schematic requirements
+
+The coprocessor uses **two current transformer (CT) clamps** read by the **internal ADC**: **boiler power-on** (GPIO39) and **low water** (GPIO34). The design assumes the **SCT-013-005** (or equivalent 5 A / 1 V voltage-output CT). Datasheet: [Seeed Studio SCT013](https://files.seeedstudio.com/wiki/AC_Current_Sensor/Datasheet_of_SCT013.pdf).
+
+**SCT-013-005 (5 A / 1 V) key specs:**
+
+| Parameter | Value |
+|-----------|--------|
+| Rated input | 5 A RMS |
+| Rated output | **1 V** (AC voltage; **built-in burden resistor**) |
+| Sensitivity | 200 mV/A |
+| Max current | 15 A |
+| Frequency | 50 Hz – 1 kHz |
+| Connector | 3.5 mm stereo jack |
+
+Because this model has a **built-in burden**, the CT outputs **0–1 V AC** directly (no external burden resistor). Two interface options:
+
+---
+
+**Option A — DC bias + software RMS (recommended; line frequency stable)**
+
+The ADC sees the **AC waveform** shifted into the positive range by a DC bias; firmware samples over an integer number of line cycles and computes RMS. No rectifier needed. See [OpenEnergyMonitor: CT Sensors - Interfacing with an Arduino](https://docs.openenergymonitor.org/electricity-monitoring/ct-sensors/interface-with-arduino.html).
+
+1. **DC bias circuit (per CT channel)**  
+   - Resistor divider from **3.3 V** to **GND**: two equal resistors (e.g. **10 kΩ** each) → **midpoint = 1.65 V**.  
+   - **Coupling capacitor** (e.g. **10 µF** non-polarized or back-to-back electrolytics): one end to the **SCT-013-005 output** (one wire), other end to the **midpoint**.  
+   - **ADC input (GPIO39 or GPIO34)** and the other end of the divider connect to this **midpoint**.  
+   - The other CT wire goes to **GND**.  
+   - The ADC therefore sees **1.65 V + AC**, so the waveform stays between ~0.25 V and ~3.05 V (for ±1.4 V peak).
+
+2. **Schematic (per channel):**
+
+```
+    3.3 V  ---- R1 (10 kΩ) ----+---- to ADC GPIO39 (or GPIO34)
+                                  |
+                                 C1 (10 µF)  ---- SCT-013-005 (one wire)
+                                  |
+    GND    ---- R2 (10 kΩ) ----+  |
+                                |
+                                +---- SCT-013-005 other wire to GND
+```
+
+3. **Firmware:** Coprocessor samples the ADC pin over a 40 ms window (~2 cycles at 50 Hz or 2.4 at 60 Hz), subtracts the DC mean (bias), computes RMS of the AC component, then scales to current (200 mV/A). Set `C3_CT_LINE_HZ` to 50 or 60 in `c3_pin_definitions.h`.
+
+4. **Parts per CT (Option A):** Two 10 kΩ resistors (R1, R2), one 10 µF coupling cap (C1). Optional: series R and clamp diodes for overvoltage protection.
+
+---
+
+**Option B — AC-to-DC conditioning (rectifier + filter)**
+
+1. **No external burden** — SCT-013-005 already provides 0–1 V AC. Do not leave the CT open when current flows.  
+2. **AC-to-DC:** Full-wave rectifier + RC low-pass, or an RMS-to-DC IC (e.g. AD736). Add DC offset so 0 A is in range (e.g. 0–3.3 V).  
+3. **Protection:** Series R and clamp diodes so that open CT or transients cannot damage the ESP32 ADC.  
+4. **Connection:** CT → conditioning → ADC GPIO39 or GPIO34; conditioning GND to ESP32 GND.
+
+**Block diagram (Option B):**
+
+```
+    SCT-013-005 (0–1 V AC)  →  [AC-to-DC + offset]  →  [clamp]  →  ADC GPIO39 or GPIO34
+```
+
+---
+
+**Summary:** For **Option A** (DC bias + software RMS), use the R1/R2/C1 circuit above per channel; no rectifier. Firmware uses `readCTChannelRMS()` on the internal ADC pins and reports V RMS and A RMS. For **Option B**, use rectifier/filter and single-sample reads; scale in firmware (e.g. 1 V DC ≈ 5 A).
+
+---
+
 ## Power Supply Architecture
 
 ```
@@ -668,6 +849,25 @@ A FreeRTOS mutex (`spiMutex`) ensures only one device uses the bus at a time.
 | Qty | Component | Part Number / Description | Notes |
 |-----|-----------|---------------------------|-------|
 | 1 | ESP32 DevKit V1 | ESP-WROOM-32, 38-pin | Main controller, WiFi/BLE |
+
+### Coprocessor variant (main board)
+
+| Qty | Component | Part Number / Description | Notes |
+|-----|-----------|---------------------------|-------|
+| 1 | RS-485 transceiver | MAX485 or equivalent | Half-duplex; DI/RO/DE/RE, A/B; main board only |
+| 1 | DE/RE GPIO | — | Use e.g. GPIO17 or per-board choice in `pin_definitions.h` |
+
+### Coprocessor variant (ESP32 DevKit boiler panel)
+
+| Qty | Component | Part Number / Description | Notes |
+|-----|-----------|---------------------------|-------|
+| 1 | ESP32 DevKit V1 | ESP-WROOM-32, 38-pin | Boiler panel coprocessor |
+| 1 | RS-485 module | Auto-direction (no DE pin) | Half-duplex; connect Serial2 RX=GPIO16, TX=GPIO17 |
+| 1–2 | Relay module(s) | 3.3V/5V logic, 1 or 2 channels | Blowdown (GPIO4), optional solenoid (GPIO15) |
+| 1 | R_sense | 150 Ω, 1%, 0.25W metal film | 4–20 mA to voltage → internal ADC (GPIO36) |
+| 2 | CT clamp SCT-013-005 | 5 A / 1 V, built-in burden | Boiler power-on (GPIO39), low water (GPIO34); [datasheet](https://files.seeedstudio.com/wiki/AC_Current_Sensor/Datasheet_of_SCT013.pdf). Section 13a: DC bias + software RMS or AC-to-DC conditioning. |
+
+Valve feedback and two CT inputs use the **internal ADC** (GPIO36 valve, GPIO39/34 CTs). No ADS1115. Each CT uses DC bias + software RMS (Option A in Section 13a) or AC-to-DC conditioning.
 
 ### Stepper Motors & Drivers
 
@@ -769,8 +969,6 @@ A FreeRTOS mutex (`spiMutex`) ensures only one device uses the bus at a time.
 
 1. **Strapping Pins:** GPIO0, GPIO2, GPIO12, and GPIO15 affect boot behavior. **GPIO12 requires an external 10k pull-down resistor to GND** to guarantee the flash voltage regulator stays at 3.3V. GPIO0 requires a 10k pull-up (provided for the encoder button). GPIO15's encoder pull-up keeps it HIGH (enables boot log — safe). Alternatively, burn the VDD_SDIO eFuse once with `espefuse.py set_flash_voltage 3.3V` to permanently ignore GPIO12's strapping function.
 
-9. **GPIO19 is free.** It can be used for future expansion (e.g., alarm relay, SD card CS, additional sensor).
-
 2. **Input-Only Pins:** GPIO34, GPIO35, GPIO36 (VP), and GPIO39 (VN) are input-only with no internal pull-up/pull-down. External pull-up resistors are required for digital inputs on these pins.
 
 3. **ADC2 vs WiFi:** ADC2 channels (GPIOs 0, 2, 4, 12-15, 25-27) cannot be used for analog reads while WiFi is active. All analog sensing uses either ADC1 pins or the external ADS1115.
@@ -784,3 +982,9 @@ A FreeRTOS mutex (`spiMutex`) ensures only one device uses the bus at a time.
 7. **Fail-Safe Blowdown:** Two independent fail-safe layers: (a) relay de-energizes on ESP32 power loss → 4 mA → valve closed, (b) actuator EP420C fails closed on signal loss.
 
 8. **ADS1115 for Feedback:** The external 16-bit ADC reads the blowdown valve position feedback, avoiding ESP32 ADC nonlinearity issues and ADC2/WiFi conflicts. It shares the I2C bus with the LCD at address 0x48.
+
+9. **GPIO19:** Used for SD card CS on the shared VSPI bus. For other expansion (e.g. alarm relay), use another spare when available.
+
+10. **Coprocessor — RS-485 at boot:** When the coprocessor link is used, main board GPIO25/36 are connected to the RS-485 transceiver. Ensure the main board DE/RE pin is driven LOW at boot so it does not drive the bus; firmware should set DE/RE LOW until the first TX. Panel uses auto-direction (no DE).
+
+11. **Coprocessor — Comms lost:** If no telemetry is received from the panel for the configured timeout (e.g. 5 s), the main should treat the link as lost and enter safe behavior: do not open blowdown, use last-known or safe defaults for display/logging. See [Coprocessor_Communication_Logic.md](Coprocessor_Communication_Logic.md).

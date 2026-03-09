@@ -1,0 +1,7 @@
+# Columbia CT-6 Main MCU partition table (Option A: OTA kept, SPIFFS removed, 32KB NVS)
+# Name, Type, SubType, Offset, Size, Flags
+nvs,      data, nvs,      0x9000,  0x8000,
+otadata,  data, ota,      0x11000, 0x2000,
+app0,     app,  ota_0,    0x13000, 0x1A0000,
+app1,     app,  ota_1,    0x1B3000,0x1A0000,
+coredump, data, coredump, 0x353000,0x10000,

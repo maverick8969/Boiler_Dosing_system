@@ -1,6 +1,7 @@
 /**
  * Boiler Dosing Controller API Server
- * Receives data from ESP32 and stores in TimescaleDB
+ * Receives data from ESP32 via HTTP and/or MQTT and stores in TimescaleDB
+ * Phase E: MQTT gateway subscribes to device/+/metrics, alarm, health
  */
 
 const express = require('express');
@@ -8,6 +9,7 @@ const { Pool } = require('pg');
 const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
+const mqtt = require('mqtt');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -26,6 +28,10 @@ const pool = new Pool({
 
 // API key for ESP32 authentication
 const API_KEY = process.env.API_KEY || 'esp32_api_key_change_me';
+
+// MQTT gateway (Phase E)
+const MQTT_URL = process.env.MQTT_URL || 'mqtt://localhost:1883';
+const MQTT_ENABLED = process.env.MQTT_ENABLED !== 'false';
 
 // Middleware
 app.use(helmet());
@@ -393,10 +399,114 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Internal server error' });
 });
 
+// ============================================
+// MQTT GATEWAY (Phase E) - device/+/metrics, alarm, health
+// ============================================
+function deviceIdFromTopic(topic) {
+  const parts = topic.split('/');
+  return parts.length >= 2 ? parts[1] : null;
+}
+
+function metricValue(metrics, id, defaultVal = null) {
+  const m = (metrics || []).find((x) => x.id === id);
+  return m != null && typeof m.value === 'number' ? m.value : defaultVal;
+}
+
+function startMqttGateway() {
+  if (!MQTT_ENABLED) return;
+  const client = mqtt.connect(MQTT_URL, { reconnectPeriod: 10000 });
+  client.on('connect', () => {
+    client.subscribe('device/+/metrics', { qos: 0 });
+    client.subscribe('device/+/alarm', { qos: 0 });
+    client.subscribe('device/+/health', { qos: 0 });
+    console.log('MQTT gateway connected, subscribed to device/+/metrics, alarm, health');
+  });
+  client.on('error', (err) => console.error('MQTT error:', err));
+
+  client.on('message', async (topic, payload) => {
+    const deviceId = deviceIdFromTopic(topic);
+    if (!deviceId) return;
+    let doc;
+    try {
+      doc = JSON.parse(payload.toString());
+    } catch (e) {
+      console.error('MQTT invalid JSON', topic, e.message);
+      return;
+    }
+    const suffix = topic.split('/').pop();
+    try {
+      if (suffix === 'metrics') {
+        const time = doc.timestamp ? new Date(doc.timestamp * 1000) : new Date();
+        const metrics = doc.metrics || [];
+        await pool.query(
+          `INSERT INTO sensor_readings
+           (time, device_id, conductivity, temperature, water_meter1, water_meter2,
+            flow_rate, blowdown_active, pump1_active, pump2_active, pump3_active, active_alarms)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+          [
+            time,
+            deviceId,
+            metricValue(metrics, 'conductivity', 0),
+            metricValue(metrics, 'temperature', 0),
+            Math.round(metricValue(metrics, 'water_meter1', 0)),
+            Math.round(metricValue(metrics, 'water_meter2', 0)),
+            metricValue(metrics, 'flow_rate', 0),
+            Boolean(metricValue(metrics, 'blowdown_active', 0)),
+            Boolean(metricValue(metrics, 'pump1_active', 0)),
+            Boolean(metricValue(metrics, 'pump2_active', 0)),
+            Boolean(metricValue(metrics, 'pump3_active', 0)),
+            Math.round(metricValue(metrics, 'active_alarms', 0)),
+          ]
+        );
+      } else if (suffix === 'alarm') {
+        const time = doc.timestamp ? new Date(doc.timestamp * 1000) : new Date();
+        if (doc.type === 'alarm') {
+          const state = doc.active ? 'active' : 'cleared';
+          await pool.query(
+            `INSERT INTO alarms (time, device_id, alarm_code, alarm_name, state, value)
+             VALUES ($1, $2, $3, $4, $5, $6)`,
+            [
+              time,
+              deviceId,
+              doc.alarm_code ?? 0,
+              doc.alarm_name || '',
+              state,
+              doc.trigger_value ?? null,
+            ]
+          );
+        } else if (doc.type === 'event') {
+          await pool.query(
+            `INSERT INTO pump_events (time, device_id, pump_id, event_type)
+             VALUES ($1, $2, $3, $4)`,
+            [time, deviceId, 0, doc.event_type || 'event']
+          );
+        }
+      } else if (suffix === 'health') {
+        if (payload.toString() === 'offline') return; // LWT, no insert
+        const time = doc.timestamp ? new Date(doc.timestamp * 1000) : new Date();
+        await pool.query(
+          `INSERT INTO system_status (time, device_id, uptime_sec, free_heap, error_count)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [
+            time,
+            deviceId,
+            doc.uptime_sec ?? null,
+            doc.free_heap ?? null,
+            doc.active_alarms ?? 0,
+          ]
+        );
+      }
+    } catch (err) {
+      console.error('MQTT gateway DB insert failed', topic, err.message);
+    }
+  });
+}
+
 // Start server
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Boiler API server running on port ${PORT}`);
   console.log(`Health check: http://localhost:${PORT}/health`);
+  startMqttGateway();
 });
 
 // Graceful shutdown

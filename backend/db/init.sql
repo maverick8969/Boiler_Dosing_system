@@ -9,6 +9,7 @@ CREATE EXTENSION IF NOT EXISTS timescaledb;
 -- ============================================
 CREATE TABLE sensor_readings (
     time                TIMESTAMPTZ     NOT NULL,
+    device_id           VARCHAR(16),    -- MQTT device id (12-char hex); NULL for HTTP-only
     conductivity        REAL,           -- µS/cm
     temperature         REAL,           -- °C
     water_meter1        BIGINT,         -- Total gallons (makeup)
@@ -32,9 +33,10 @@ CREATE INDEX idx_readings_time ON sensor_readings (time DESC);
 -- ============================================
 CREATE TABLE pump_events (
     time                TIMESTAMPTZ     NOT NULL,
-    pump_id             INTEGER         NOT NULL,   -- 1=H2SO3, 2=NaOH, 3=Amine
+    device_id           VARCHAR(16),    -- MQTT device id; NULL for HTTP-only
+    pump_id             INTEGER         NOT NULL,   -- 1=H2SO3, 2=NaOH, 3=Amine, 0=system/FW
     pump_name           VARCHAR(32),
-    event_type          VARCHAR(16)     NOT NULL,   -- 'start', 'stop', 'prime', 'calibrate'
+    event_type          VARCHAR(16)     NOT NULL,   -- 'start', 'stop', 'prime', 'FW_PUMP_ON', etc.
     duration_ms         INTEGER,
     volume_ml           REAL,
     trigger_source      VARCHAR(32),    -- 'conductivity', 'timer', 'manual', 'water_meter'
@@ -67,6 +69,7 @@ CREATE INDEX idx_blowdown_time ON blowdown_events (time DESC);
 -- ============================================
 CREATE TABLE alarms (
     time                TIMESTAMPTZ     NOT NULL,
+    device_id           VARCHAR(16),    -- MQTT device id; NULL for HTTP-only
     alarm_code          INTEGER         NOT NULL,
     alarm_name          VARCHAR(64),
     severity            VARCHAR(16),    -- 'warning', 'alarm', 'critical'
@@ -115,6 +118,7 @@ CREATE INDEX idx_config_time ON config_changes (time DESC);
 -- ============================================
 CREATE TABLE system_status (
     time                TIMESTAMPTZ     NOT NULL,
+    device_id           VARCHAR(16),    -- MQTT device id; NULL for HTTP-only
     uptime_sec          BIGINT,
     free_heap           INTEGER,
     wifi_rssi           INTEGER,

@@ -9,6 +9,9 @@
 RotaryEncoder encoder;
 MenuNavigator menuNav(&encoder);
 
+// ISR-safe tick (written by task, read by ISR) — F4: avoid millis() in ISR
+static volatile uint32_t s_encoder_tick_ms = 0;
+
 // State table for quadrature decoding
 // Indexed by (old_state << 2) | new_state
 // Values: 0 = no change, 1 = CW, -1 = CCW
@@ -43,6 +46,8 @@ RotaryEncoder::RotaryEncoder(uint8_t pin_a, uint8_t pin_b, uint8_t pin_btn)
     , _last_position(0)
     , _last_state(0)
     , _last_rotation_time(0)
+    , _last_delta_time(0)
+    , _pulse_count(0)
     , _button_pressed(false)
     , _button_press_time(0)
     , _button_release_time(0)
@@ -81,13 +86,25 @@ bool RotaryEncoder::begin() {
 }
 
 void RotaryEncoder::update() {
+    // Feed ISR-safe tick for button debounce (F4)
+    setTickMs(millis());
+
     // Process button state
     processButton();
 
-    // Process events and call callback
+    // Process events and call callback; apply acceleration here (F4: not in ISR)
     if (_callback) {
         encoder_event_t event;
         while ((event = getEvent()) != ENC_EVENT_NONE) {
+            if (event == ENC_EVENT_CW || event == ENC_EVENT_CCW) {
+                uint32_t now = millis();
+                int8_t step = 1;
+                if (_acceleration_enabled && (now - _last_rotation_time) < _accel_threshold)
+                    step = _accel_multiplier;
+                _last_rotation_time = now;
+                int8_t dir = (event == ENC_EVENT_CW) ? 1 : -1;
+                _position += (step - 1) * dir;
+            }
             _callback(event, _position);
         }
     }
@@ -115,6 +132,7 @@ void RotaryEncoder::setPosition(int32_t pos) {
     noInterrupts();
     _position = pos;
     _last_position = pos;
+    _pulse_count = 0;
     interrupts();
     applyLimits();
 }
@@ -160,44 +178,42 @@ void RotaryEncoder::clearLimits() {
     _limits_enabled = false;
 }
 
+void RotaryEncoder::setTickMs(uint32_t ms) {
+    s_encoder_tick_ms = ms;
+}
+
 void IRAM_ATTR RotaryEncoder::handleEncoderISR(void* arg) {
     RotaryEncoder* enc = (RotaryEncoder*)arg;
 
     // Read current state
     uint8_t state = (digitalRead(enc->_pin_a) << 1) | digitalRead(enc->_pin_b);
 
-    // Use state table to determine direction
+    // Use state table to determine direction for this quadrature edge
     uint8_t index = (enc->_last_state << 2) | state;
     int8_t delta = ENCODER_STATE_TABLE[index];
 
     if (delta != 0) {
-        uint32_t now = millis();
-        uint32_t time_diff = now - enc->_last_rotation_time;
+        // Accumulate raw quadrature transitions toward a full detent.
+        enc->_pulse_count += delta;
 
-        // Apply acceleration
-        int8_t step = 1;
-        if (enc->_acceleration_enabled && time_diff < enc->_accel_threshold) {
-            step = enc->_accel_multiplier;
-        }
+        // When we've accumulated ENCODER_STEPS_PER_NOTCH pulses in one direction, treat
+        // that as a single physical detent and update both the logical position and
+        // the high-level CW/CCW event queue.
+        if (abs(enc->_pulse_count) >= ENCODER_STEPS_PER_NOTCH) {
+            // Preserve previous direction semantics for _position: one detent step is
+            // equivalent to the sign of the old net (-sum(delta)) across the detent.
+            int8_t detent_dir = (enc->_pulse_count > 0) ? -1 : 1;
+            enc->_position += detent_dir;
 
-        enc->_position += delta * step;
-        enc->_last_rotation_time = now;
+            encoder_event_t event = (enc->_pulse_count > 0) ? ENC_EVENT_CCW : ENC_EVENT_CW;
 
-        // Queue event (every STEPS_PER_NOTCH pulses)
-        static int8_t pulse_count = 0;
-        pulse_count += delta;
-
-        if (abs(pulse_count) >= ENCODER_STEPS_PER_NOTCH / 4) {
-            encoder_event_t event = (pulse_count > 0) ? ENC_EVENT_CW : ENC_EVENT_CCW;
-
-            // Queue the event
             int next_head = (enc->_queue_head + 1) % QUEUE_SIZE;
             if (next_head != enc->_queue_tail) {
                 enc->_event_queue[enc->_queue_head] = event;
                 enc->_queue_head = next_head;
             }
 
-            pulse_count = 0;
+            enc->_pulse_count = 0;
         }
     }
 
@@ -207,9 +223,9 @@ void IRAM_ATTR RotaryEncoder::handleEncoderISR(void* arg) {
 void IRAM_ATTR RotaryEncoder::handleButtonISR(void* arg) {
     RotaryEncoder* enc = (RotaryEncoder*)arg;
 
-    // Debounce
+    // Debounce using ISR-safe tick (F4: no millis() in ISR)
     static uint32_t last_interrupt = 0;
-    uint32_t now = millis();
+    uint32_t now = s_encoder_tick_ms;
     if (now - last_interrupt < ENCODER_BTN_DEBOUNCE_MS) return;
     last_interrupt = now;
 
@@ -332,19 +348,19 @@ void MenuNavigator::setSelectedIndex(int index) {
     }
 }
 
-bool MenuNavigator::update() {
+bool MenuNavigator::update(bool process_rotation) {
     _enter_pressed = false;
     _back_pressed = false;
     _home_pressed = false;
 
     bool changed = false;
 
-    // Process encoder events
+    // Process encoder events (always consume to drain queue; only update selection when process_rotation)
     encoder_event_t event;
     while ((event = _encoder->getEvent()) != ENC_EVENT_NONE) {
         switch (event) {
             case ENC_EVENT_CW:
-                if (!_editing) {
+                if (process_rotation && !_editing) {
                     _selected++;
                     if (_selected >= _item_count) {
                         _selected = _wrap ? 0 : _item_count - 1;
@@ -354,7 +370,7 @@ bool MenuNavigator::update() {
                 break;
 
             case ENC_EVENT_CCW:
-                if (!_editing) {
+                if (process_rotation && !_editing) {
                     _selected--;
                     if (_selected < 0) {
                         _selected = _wrap ? _item_count - 1 : 0;

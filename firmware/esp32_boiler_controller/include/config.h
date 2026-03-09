@@ -40,7 +40,8 @@
 #define WIFI_RECONNECT_DELAY_MS 5000
 #define WIFI_HOSTNAME           "boiler-controller"
 
-// Default AP mode credentials (for initial setup)
+// Default AP mode credentials (for initial setup).
+// F6: Change WIFI_AP_PASS on first use; avoid leaving default in production.
 #define WIFI_AP_SSID            "BoilerController-Setup"
 #define WIFI_AP_PASS            "boiler2024"
 #define WIFI_AP_CHANNEL         1
@@ -60,6 +61,13 @@
 #define TSDB_HTTP_PORT          3000    // API server port (not PostgreSQL)
 #define TSDB_LOG_INTERVAL_MS    10000   // 10 seconds default
 #define TSDB_API_KEY_MAX_LEN    64      // API authentication key length
+
+// MQTT / Sparkplug telemetry (Modern IoT Stack)
+#define MQTT_HOST_MAX_LEN       64
+#define MQTT_USER_MAX_LEN       32
+#define MQTT_PASS_MAX_LEN       64
+#define MQTT_PORT_DEFAULT       1883
+#define DEVICE_ID_MAX_LEN       16      // MAC-derived hex string (12 chars + null)
 
 // ============================================================================
 // SAMPLING MODE DEFINITIONS
@@ -412,6 +420,13 @@ typedef struct {
     uint16_t tsdb_port;
     char api_key[TSDB_API_KEY_MAX_LEN];     // API authentication key
     uint32_t log_interval_ms;
+
+    // MQTT telemetry (Sparkplug-style; when enabled, replaces HTTP upload)
+    char mqtt_host[MQTT_HOST_MAX_LEN];
+    uint16_t mqtt_port;
+    char mqtt_user[MQTT_USER_MAX_LEN];
+    char mqtt_pass[MQTT_PASS_MAX_LEN];
+    bool use_mqtt_telemetry;                // true = publish via MQTT; false = HTTP (legacy)
 
     // Security
     uint16_t access_code;           // 4-digit PIN

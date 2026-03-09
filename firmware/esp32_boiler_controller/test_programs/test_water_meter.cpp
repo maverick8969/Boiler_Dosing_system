@@ -120,7 +120,7 @@ void setup() {
     Serial.printf("  Pulses per gallon: %d\n", PULSES_PER_GALLON);
     Serial.printf("  Debounce: %d ms\n", DEBOUNCE_MS);
     Serial.println();
-    Serial.println("Tip: Press BOOT button (GPIO0) to simulate a pulse on Meter 1");
+    Serial.println("Tip: Momentarily short WATER_METER1_PIN to GND to simulate a pulse on Meter 1");
     Serial.println();
 
     printMenu();

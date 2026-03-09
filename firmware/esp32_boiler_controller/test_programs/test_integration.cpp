@@ -89,8 +89,10 @@ void setup() {
     pinMode(STEPPER_ENABLE_PIN, OUTPUT);
     digitalWrite(STEPPER_ENABLE_PIN, HIGH);  // Disabled
 
+#if BLOWDOWN_RELAY_PIN >= 0
     pinMode(BLOWDOWN_RELAY_PIN, OUTPUT);
     digitalWrite(BLOWDOWN_RELAY_PIN, LOW);
+#endif
 
     pinMode(FEEDWATER_PUMP_PIN, INPUT);  // Input-only GPIO, external pull-up
     pinMode(ENCODER_BUTTON_PIN, INPUT_PULLUP);
@@ -244,13 +246,18 @@ void testDigitalInputs() {
 void testRelayOutputs() {
     Serial.println("\n--- Relay Output Test ---");
 
-    Serial.println("  Testing blowdown relay (GPIO4)...");
-    digitalWrite(BLOWDOWN_RELAY_PIN, HIGH);
-    delay(200);
-    digitalWrite(BLOWDOWN_RELAY_PIN, LOW);
+    if (BLOWDOWN_RELAY_PIN < 0) {
+        addResult("Relay Output", true, "No local blowdown relay on main MCU (coprocessor handles valve)");
+        Serial.println("  Skipping blowdown relay test (handled by coprocessor).");
+    } else {
+        Serial.printf("  Testing blowdown relay (GPIO%d)...\n", BLOWDOWN_RELAY_PIN);
+        digitalWrite(BLOWDOWN_RELAY_PIN, HIGH);
+        delay(200);
+        digitalWrite(BLOWDOWN_RELAY_PIN, LOW);
 
-    addResult("Relay Output", true, "Blowdown relay toggled");
-    Serial.println("PASS: Blowdown relay toggled (verify with click sound)");
+        addResult("Relay Output", true, "Blowdown relay toggled");
+        Serial.println("PASS: Blowdown relay toggled (verify with click sound)");
+    }
 }
 
 void testStepperMotors() {

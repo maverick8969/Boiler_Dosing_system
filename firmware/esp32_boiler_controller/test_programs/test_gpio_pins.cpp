@@ -54,7 +54,9 @@ PinInfo outputPins[] = {
     {STEPPER2_DIR_PIN,    "STEPPER2_DIR",    "OUT"},
     {STEPPER3_STEP_PIN,   "STEPPER3_STEP",   "OUT"},
     {STEPPER3_DIR_PIN,    "STEPPER3_DIR",    "OUT"},
+#if BLOWDOWN_RELAY_PIN >= 0
     {BLOWDOWN_RELAY_PIN,  "BLOWDOWN_RELAY",  "OUT"},
+#endif
     {WS2812_DATA_PIN,     "WS2812_DATA",     "OUT"},
     {MAX31865_CS_PIN,     "MAX31865_CS",     "OUT"},
     {MAX31865_MOSI_PIN,   "MAX31865_MOSI",   "OUT"},
@@ -231,11 +233,15 @@ void testRelays() {
     Serial.println("=== BLOWDOWN RELAY TEST ===");
     Serial.println();
 
-    Serial.println("Relay ON (GPIO4 HIGH → 20mA → OPEN)...");
-    digitalWrite(BLOWDOWN_RELAY_PIN, HIGH);
-    delay(1000);
-    Serial.println("Relay OFF (GPIO4 LOW → 4mA → CLOSED)");
-    digitalWrite(BLOWDOWN_RELAY_PIN, LOW);
+    if (BLOWDOWN_RELAY_PIN < 0) {
+        Serial.println("Blowdown relay not present on main MCU (using coprocessor link).");
+    } else {
+        Serial.printf("Relay ON (GPIO%d HIGH → 20mA → OPEN)...\n", BLOWDOWN_RELAY_PIN);
+        digitalWrite(BLOWDOWN_RELAY_PIN, HIGH);
+        delay(1000);
+        Serial.printf("Relay OFF (GPIO%d LOW → 4mA → CLOSED)\n", BLOWDOWN_RELAY_PIN);
+        digitalWrite(BLOWDOWN_RELAY_PIN, LOW);
+    }
 
     Serial.println();
     Serial.println("Relay test complete.");

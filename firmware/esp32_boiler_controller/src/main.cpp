@@ -32,22 +32,39 @@
 #include "data_logger.h"
 #include "sd_logger.h"
 #include "web_server.h"
+#include "mqtt_telemetry.h"
 #include "fuzzy_logic.h"
 #include "device_manager.h"
+#include "encoder.h"
 #include "self_test.h"
 #include "sensor_health.h"
 #include <esp_task_wdt.h>
+
+#include "coprocessor_protocol.h"  // cp_crc16 for config checksum (F5)
+#ifdef USE_COPROCESSOR_LINK
+#include "coprocessor_link.h"
+#endif
 
 // ============================================================================
 // GLOBAL INSTANCES
 // ============================================================================
 
 // Conductivity sensor (Atlas Scientific EZO-EC via UART + Adafruit MAX31865 PT1000 RTD via hardware VSPI)
+// When USE_COPROCESSOR_LINK: Serial2 is used for RS-485 link; EZO/MAX31865 are on the panel.
+#ifndef USE_COPROCESSOR_LINK
 ConductivitySensor conductivitySensor(
     Serial2,
     EZO_EC_RX_PIN, EZO_EC_TX_PIN,
     MAX31865_CS_PIN  // Hardware SPI — shares VSPI bus with SD card
 );
+#endif
+
+#ifdef USE_COPROCESSOR_LINK
+CoprocessorLink coprocessorLink(Serial2, CP_LINK_DE_RE_PIN);
+static bool s_last_blowdown_energized = false;  // For command-on-change only
+static bool s_coprocessor_ready = false;         // First valid telemetry or timeout
+static const uint32_t COPROC_WAIT_TIMEOUT_MS = 10000;  // Enter normal after first telemetry or 10 s
+#endif
 
 // System configuration (stored in NVS)
 system_config_t systemConfig;
@@ -66,6 +83,35 @@ TaskHandle_t taskControl = NULL;
 TaskHandle_t taskMeasurement = NULL;
 TaskHandle_t taskDisplay = NULL;
 TaskHandle_t taskLogging = NULL;
+
+// Conductivity history for trend (rate of change µS/cm per minute)
+#define COND_HISTORY_MIN_MS 60000   // Min 1 minute between samples for trend
+static float s_cond_history_value = 0.0f;
+static uint32_t s_cond_history_time = 0;
+static bool s_cond_history_valid = false;
+
+// Pending API command (executed in control task context; Modern IoT Stack)
+#define PENDING_CMD_NAME_LEN       24
+#define PENDING_CMD_REQUEST_ID_LEN 48
+static struct {
+    char name[PENDING_CMD_NAME_LEN];
+    char request_id[PENDING_CMD_REQUEST_ID_LEN];
+    int8_t param_pump_index;       // for pump_prime: 0-2
+    uint32_t param_duration_ms;    // for pump_prime
+    bool pending;
+} s_pending_command = { "", "", -1, 0, false };
+
+static void setPendingCommand(const char* request_id, const char* name, int8_t pump_index = -1, uint32_t duration_ms = 5000) {
+    strncpy(s_pending_command.request_id, request_id ? request_id : "", PENDING_CMD_REQUEST_ID_LEN - 1);
+    s_pending_command.request_id[PENDING_CMD_REQUEST_ID_LEN - 1] = '\0';
+    strncpy(s_pending_command.name, name ? name : "", PENDING_CMD_NAME_LEN - 1);
+    s_pending_command.name[PENDING_CMD_NAME_LEN - 1] = '\0';
+    s_pending_command.param_pump_index = pump_index;
+    s_pending_command.param_duration_ms = duration_ms;
+    s_pending_command.pending = true;
+}
+
+static bool handleApiCommand(const char* request_id, const char* name, const JsonObject& params, String* outMessage);
 
 // ============================================================================
 // FUNCTION DECLARATIONS
@@ -110,8 +156,15 @@ void setup() {
     // Initialize shared VSPI bus (MAX31865 + SD card)
     SPI.begin(MAX31865_SCK_PIN, MAX31865_MISO_PIN, MAX31865_MOSI_PIN);
     spiMutex = xSemaphoreCreateMutex();
+    if (spiMutex == NULL) {
+        Serial.println("FATAL: SPI mutex creation failed (heap exhausted?)");
+        display.showAlarm("INIT FAIL");
+        for (;;) { delay(1000); }
+    }
+#if defined(DEBUG_MODE) || (CORE_DEBUG_LEVEL >= 3)
     Serial.printf("VSPI bus: SCK=%d, MISO=%d, MOSI=%d (shared: MAX31865 + SD)\n",
                   MAX31865_SCK_PIN, MAX31865_MISO_PIN, MAX31865_MOSI_PIN);
+#endif
 
     // Load configuration from NVS
     loadConfiguration();
@@ -141,12 +194,22 @@ void setup() {
     }
     display.showMessage("Initializing...", "Please wait");
 
+#ifdef USE_COPROCESSOR_LINK
+    // RS-485 link to panel (conductivity/temp on panel)
+    if (!coprocessorLink.begin(CP_LINK_BAUD)) {
+        Serial.println("ERROR: Coprocessor link initialization failed!");
+        display.showAlarm("LINK ERROR");
+    } else {
+        Serial.println("Coprocessor link initialized (2-DevKit mode)");
+    }
+#else
     // Conductivity sensor (hardware SPI via shared VSPI)
     if (!conductivitySensor.begin()) {
         Serial.println("ERROR: Conductivity sensor initialization failed!");
         display.showAlarm("SENSOR ERROR");
     }
     conductivitySensor.configure(&systemConfig.conductivity);
+#endif
 
     // Pump manager
     if (!pumpManager.begin()) {
@@ -161,17 +224,22 @@ void setup() {
     waterMeterManager.configure(systemConfig.meters);
     waterMeterManager.loadAllFromNVS();
 
-    // Blowdown controller
+    // Blowdown controller (local relay; when USE_COPROCESSOR_LINK panel also has valve, we send commands)
     if (!blowdownController.begin()) {
         Serial.println("ERROR: Blowdown controller initialization failed!");
     }
     blowdownController.configure(&systemConfig.blowdown);
     blowdownController.setConductivityConfig(&systemConfig.conductivity);
+#ifdef USE_COPROCESSOR_LINK
+    s_last_blowdown_energized = false;
+#endif
 
     // Data logger
     if (!dataLogger.begin(&systemConfig)) {
         Serial.println("WARNING: Data logger initialization failed!");
     }
+
+    mqttTelemetry.begin(&systemConfig);
 
     // Connect to WiFi
     if (strlen(systemConfig.wifi_ssid) > 0) {
@@ -187,9 +255,12 @@ void setup() {
 
     // Web server (accessible via AP hotspot at 192.168.4.1 and via STA IP)
     if (webServer.begin(&systemConfig, &fuzzyController)) {
+        webServer.setCommandHandler(handleApiCommand);
+#if defined(DEBUG_MODE) || (CORE_DEBUG_LEVEL >= 3)
         Serial.printf("Web UI: http://%s/ (AP) or http://%s/ (STA)\n",
                       WiFi.softAPIP().toString().c_str(),
                       WiFi.localIP().toString().c_str());
+#endif
         display.showMessage("Web UI Active", WiFi.softAPIP().toString().c_str());
         delay(500);
     }
@@ -232,50 +303,60 @@ void setup() {
     // Note: AUX_INPUT2 (GPIO18) repurposed for MAX31865 SCK
 
     // Rotary encoder pins are initialized by the encoder module's begin().
-    // The encoder push button (GPIO0) is the sole physical button (select/menu).
+    // The encoder push button (ENCODER_BUTTON_PIN, GPIO4 on main MCU) is the sole
+    // physical button (select/menu).
 
-    // Create FreeRTOS tasks
+    // Create FreeRTOS tasks (F3: check returns to avoid NULL deref / missing control task)
     Serial.println("Creating tasks...");
 
-    xTaskCreatePinnedToCore(
-        taskControlLoop,
-        "Control",
-        TASK_STACK_CONTROL,
-        NULL,
-        TASK_PRIORITY_CONTROL,
-        &taskControl,
-        1  // Core 1
-    );
-
-    xTaskCreatePinnedToCore(
-        taskMeasurementLoop,
-        "Measurement",
-        TASK_STACK_MEASUREMENT,
-        NULL,
-        TASK_PRIORITY_MEASUREMENT,
-        &taskMeasurement,
-        1  // Core 1
-    );
-
-    xTaskCreatePinnedToCore(
-        taskDisplayLoop,
-        "Display",
-        TASK_STACK_DISPLAY,
-        NULL,
-        TASK_PRIORITY_DISPLAY,
-        &taskDisplay,
-        0  // Core 0
-    );
-
-    xTaskCreatePinnedToCore(
-        taskLoggingLoop,
-        "Logging",
-        TASK_STACK_LOGGING,
-        NULL,
-        TASK_PRIORITY_LOGGING,
-        &taskLogging,
-        0  // Core 0
-    );
+    if (xTaskCreatePinnedToCore(
+            taskControlLoop,
+            "Control",
+            TASK_STACK_CONTROL,
+            NULL,
+            TASK_PRIORITY_CONTROL,
+            &taskControl,
+            1) != pdPASS) {
+        Serial.println("FATAL: Control task creation failed");
+        display.showAlarm("INIT FAIL");
+        for (;;) { delay(1000); }
+    }
+    if (xTaskCreatePinnedToCore(
+            taskMeasurementLoop,
+            "Measurement",
+            TASK_STACK_MEASUREMENT,
+            NULL,
+            TASK_PRIORITY_MEASUREMENT,
+            &taskMeasurement,
+            1) != pdPASS) {
+        Serial.println("FATAL: Measurement task creation failed");
+        display.showAlarm("INIT FAIL");
+        for (;;) { delay(1000); }
+    }
+    if (xTaskCreatePinnedToCore(
+            taskDisplayLoop,
+            "Display",
+            TASK_STACK_DISPLAY,
+            NULL,
+            TASK_PRIORITY_DISPLAY,
+            &taskDisplay,
+            0) != pdPASS) {
+        Serial.println("FATAL: Display task creation failed");
+        display.showAlarm("INIT FAIL");
+        for (;;) { delay(1000); }
+    }
+    if (xTaskCreatePinnedToCore(
+            taskLoggingLoop,
+            "Logging",
+            TASK_STACK_LOGGING,
+            NULL,
+            TASK_PRIORITY_LOGGING,
+            &taskLogging,
+            0) != pdPASS) {
+        Serial.println("FATAL: Logging task creation failed");
+        display.showAlarm("INIT FAIL");
+        for (;;) { delay(1000); }
+    }
 
     // Initialization complete
     Serial.println("Initialization complete!");
@@ -293,6 +374,9 @@ void loop() {
     // Handle any non-time-critical operations here
 
     esp_task_wdt_reset();  // Feed the hardware watchdog
+
+    // Feed encoder ISR-safe tick (F4) so button debounce works even if update() not called
+    encoder.setTickMs(millis());
 
     // Check for button presses
     processInputs();
@@ -315,10 +399,44 @@ void taskControlLoop(void* parameter) {
         // --- Sensor health check ---
         sensorHealth.update();
 
-        // --- Safe mode enforcement ---
-        if (sensorHealth.isInSafeMode()) {
+#ifdef USE_COPROCESSOR_LINK
+        // Poll RS-485 for telemetry; update health and comms-lost state
+        coprocessorLink.poll();
+        if (coprocessorLink.isCommsLost()) {
+            sensorHealth.reportCommsLost(true);
+        } else {
+            const cp_link_telemetry_t& t = coprocessorLink.getLastTelemetry();
+            if (t.valid) {
+                if (!s_coprocessor_ready) s_coprocessor_ready = true;  // Boot handshake: first valid telemetry
+                sensorHealth.reportCommsLost(false);
+                sensorHealth.reportMeasurementCycle();
+                sensorHealth.reportConductivityOK(t.conductivity_uS_cm);
+                sensorHealth.reportTemperatureOK(t.temperature_c);
+            } else {
+                sensorHealth.reportCommsLost(true);
+            }
+        }
+        // Wait for first valid telemetry (or timeout) before running normal control
+        if (!s_coprocessor_ready && (millis() >= COPROC_WAIT_TIMEOUT_MS)) {
+            s_coprocessor_ready = true;  // Timeout: proceed anyway, safe mode will apply if still no telemetry
+        }
+#endif
+
+        // --- Safe mode enforcement (also when waiting for coprocessor) ---
+        if (sensorHealth.isInSafeMode()
+#ifdef USE_COPROCESSOR_LINK
+            || !s_coprocessor_ready
+#endif
+        ) {
             blowdownController.closeValve();
             pumpManager.stopAll();
+#ifdef USE_COPROCESSOR_LINK
+            // Tell panel to close valve when we are in safe mode
+            if (!coprocessorLink.isCommsLost()) {
+                coprocessorLink.sendBlowdownClose();
+            }
+            s_last_blowdown_energized = false;
+#endif
 
             // Still monitor feedwater pump and check alarms
             updateFeedwaterPumpMonitor();
@@ -328,24 +446,107 @@ void taskControlLoop(void* parameter) {
             continue;  // Skip normal control logic
         }
 
+        // --- Pending API command (execute in control context; Modern IoT Stack) ---
+        if (s_pending_command.pending) {
+            char req_id[PENDING_CMD_REQUEST_ID_LEN];
+            char cmd_name[PENDING_CMD_NAME_LEN];
+            int8_t pump_idx = s_pending_command.param_pump_index;
+            uint32_t duration_ms = s_pending_command.param_duration_ms;
+            strncpy(req_id, s_pending_command.request_id, PENDING_CMD_REQUEST_ID_LEN - 1);
+            req_id[PENDING_CMD_REQUEST_ID_LEN - 1] = '\0';
+            strncpy(cmd_name, s_pending_command.name, PENDING_CMD_NAME_LEN - 1);
+            cmd_name[PENDING_CMD_NAME_LEN - 1] = '\0';
+            s_pending_command.pending = false;
+
+            if (strcmp(cmd_name, "blowdown_start") == 0) {
+                blowdownController.openValve();
+                webServer.broadcastCommandResult(req_id, "completed", "Blowdown started");
+                mqttTelemetry.publishCommandResult(req_id, "completed", "Blowdown started");
+            } else if (strcmp(cmd_name, "blowdown_stop") == 0) {
+                blowdownController.closeValve();
+                webServer.broadcastCommandResult(req_id, "completed", "Blowdown stopped");
+                mqttTelemetry.publishCommandResult(req_id, "completed", "Blowdown stopped");
+            } else if (strcmp(cmd_name, "pump_prime") == 0 && pump_idx >= 0 && pump_idx <= 2) {
+                ChemicalPump* p = pumpManager.getPump((pump_id_t)pump_idx);
+                if (p) {
+                    p->prime(duration_ms);
+                    webServer.broadcastCommandResult(req_id, "completed", "Pump prime started");
+                    mqttTelemetry.publishCommandResult(req_id, "completed", "Pump prime started");
+                } else {
+                    webServer.broadcastCommandResult(req_id, "failed", "Pump not available");
+                    mqttTelemetry.publishCommandResult(req_id, "failed", "Pump not available");
+                }
+            } else {
+                webServer.broadcastCommandResult(req_id, "failed", "Unknown or invalid command");
+                mqttTelemetry.publishCommandResult(req_id, "failed", "Unknown or invalid command");
+            }
+        }
+
         // --- Feedwater pump monitoring (GPIO35 via optocoupler) ---
         updateFeedwaterPumpMonitor();
 
-        // Get current conductivity
-        float conductivity = conductivitySensor.getLastReading().calibrated;
+        // Get current conductivity and temperature (local sensors or telemetry)
+        float conductivity;
+        float temperature_c;
+#ifdef USE_COPROCESSOR_LINK
+        {
+            const cp_link_telemetry_t& t = coprocessorLink.getLastTelemetry();
+            if (t.valid) {
+                conductivity = t.conductivity_uS_cm;
+                temperature_c = t.temperature_c;
+                systemState.conductivity_calibrated = t.conductivity_uS_cm;
+                systemState.temperature_celsius = t.temperature_c;
+                systemState.conductivity_raw = t.conductivity_uS_cm;
+                systemState.conductivity_compensated = t.conductivity_uS_cm;
+            } else {
+                conductivity = 0.0f;
+                temperature_c = 0.0f;
+            }
+        }
+#else
+        conductivity = conductivitySensor.getLastReading().calibrated;
+        temperature_c = conductivitySensor.getLastReading().temperature_c;
+#endif
 
         // Update blowdown control (flow_ok always true — no flow switch installed)
         blowdownController.update(conductivity);
+
+#ifdef USE_COPROCESSOR_LINK
+        // Send blowdown open/close to panel on transition only
+        bool energized = blowdownController.getStatus().relay_energized;
+        if (energized != s_last_blowdown_energized) {
+            s_last_blowdown_energized = energized;
+            if (!coprocessorLink.isCommsLost()) {
+                if (energized)
+                    coprocessorLink.sendBlowdownOpen();
+                else
+                    coprocessorLink.sendBlowdownClose();
+            }
+        }
+#endif
 
         // Get water meter data for feed modes
         uint32_t water_contacts = waterMeterManager.getContactsSinceLast(2);  // Both meters
         float water_volume = waterMeterManager.getVolumeSinceLast(2);
 
+        // Conductivity trend (µS/cm per minute)
+        float cond_trend = 0.0f;
+        uint32_t now_ms = millis();
+        if (s_cond_history_valid && (now_ms - s_cond_history_time) >= COND_HISTORY_MIN_MS) {
+            float dt_min = (now_ms - s_cond_history_time) / 60000.0f;
+            if (dt_min > 0.0f) {
+                cond_trend = (conductivity - s_cond_history_value) / dt_min;
+            }
+        }
+        s_cond_history_value = conductivity;
+        s_cond_history_time = now_ms;
+        s_cond_history_valid = true;
+
         // Build fuzzy inputs from current readings and manual test values
         fuzzy_inputs_t fuzzy_inputs;
         fuzzy_inputs.conductivity = conductivity;
-        fuzzy_inputs.temperature = conductivitySensor.getLastReading().temperature_c;
-        fuzzy_inputs.cond_trend = 0.0f;  // TODO: Calculate from history
+        fuzzy_inputs.temperature = temperature_c;
+        fuzzy_inputs.cond_trend = cond_trend;
         // Manual inputs are set via web UI or LCD menu through fuzzyController.setManualInput()
         fuzzy_inputs.alkalinity = 0.0f;
         fuzzy_inputs.sulfite = 0.0f;
@@ -365,6 +566,25 @@ void taskControlLoop(void* parameter) {
         fuzzy_rates[PUMP_H2SO3] = fuzzy_result.acid_rate;
         fuzzy_rates[PUMP_NAOH] = fuzzy_result.caustic_rate;
         fuzzy_rates[PUMP_AMINE] = fuzzy_result.sulfite_rate;
+
+        // Clamp rates so effective ml/min does not exceed configured max (Mode F)
+        float flow_gal_per_min = waterMeterManager.getCombinedFlowRate();
+        const float max_ml_min[] = {
+            systemConfig.fuzzy.acid_max_ml_min,
+            systemConfig.fuzzy.caustic_max_ml_min,
+            systemConfig.fuzzy.sulfite_max_ml_min
+        };
+        if (flow_gal_per_min > 0.01f) {
+            for (int i = 0; i < PUMP_COUNT; i++) {
+                float ml_per_gal = systemConfig.pumps[i].ml_per_gallon_at_100pct;
+                if (ml_per_gal > 0 && max_ml_min[i] > 0) {
+                    float max_pct = 100.0f * max_ml_min[i] / (flow_gal_per_min * ml_per_gal);
+                    if (max_pct < 100.0f && fuzzy_rates[i] > max_pct) {
+                        fuzzy_rates[i] = max_pct;
+                    }
+                }
+            }
+        }
 
         // Process pump feed modes with fuzzy rates for Mode F
         pumpManager.processFeedModes(
@@ -387,9 +607,13 @@ void taskControlLoop(void* parameter) {
 }
 
 void taskMeasurementLoop(void* parameter) {
+    esp_task_wdt_add(NULL);  // Subscribe this task to watchdog
     TickType_t lastWakeTime = xTaskGetTickCount();
 
     while (true) {
+        esp_task_wdt_reset();  // Feed the watchdog
+
+#ifndef USE_COPROCESSOR_LINK
         // Read conductivity sensor (acquires shared SPI bus for MAX31865)
         if (xSemaphoreTake(spiMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
             conductivity_reading_t reading = conductivitySensor.read();
@@ -419,6 +643,8 @@ void taskMeasurementLoop(void* parameter) {
         }
         // If mutex not acquired, measurement is stale — sensorHealth.update()
         // in the control task will detect this via getMeasurementAge().
+#endif
+        // When USE_COPROCESSOR_LINK, conductivity/temp come from telemetry in control task.
 
         // Update water meters
         waterMeterManager.update();
@@ -429,9 +655,12 @@ void taskMeasurementLoop(void* parameter) {
 }
 
 void taskDisplayLoop(void* parameter) {
+    esp_task_wdt_add(NULL);  // Subscribe this task to watchdog
     TickType_t lastWakeTime = xTaskGetTickCount();
 
     while (true) {
+        esp_task_wdt_reset();  // Feed the watchdog
+
         // Update display
         display.update();
 
@@ -440,30 +669,61 @@ void taskDisplayLoop(void* parameter) {
     }
 }
 
+#define WS_STATE_PUSH_INTERVAL_MS  2000   // Push state to WebSocket clients every 2 s (Modern IoT Stack)
+#define MQTT_HEALTH_INTERVAL_MS    60000  // Publish MQTT health every 60 s (Phase C)
+
 void taskLoggingLoop(void* parameter) {
+    esp_task_wdt_add(NULL);  // Subscribe this task to watchdog
     TickType_t lastWakeTime = xTaskGetTickCount();
     uint32_t lastLogTime = 0;
+    uint32_t lastWsPush = 0;
+    uint32_t lastMqttHealth = 0;
 
     while (true) {
+        esp_task_wdt_reset();  // Feed the watchdog
+
         // Update data logger (handle WiFi reconnection, etc.)
         dataLogger.update();
+
+        // MQTT telemetry (Phase C): maintain connection, flush buffer
+        mqttTelemetry.update();
+        webServer.setMqttConnected(mqttTelemetry.isConnected());
 
         // Update SD logger (periodic flush)
         sdLogger.update();
 
         // Service web server requests (AP + STA clients)
         webServer.handleClient();
+        webServer.checkManualTestExpiry();
+        webServer.applyEstimatedPhIfNeeded();
         webServer.updateReadings(
             systemState.conductivity_calibrated,
             systemState.temperature_celsius,
-            0.0f  // TODO: flow_rate from water meter
+            waterMeterManager.getCombinedFlowRate()
         );
 
-        // Log sensor data at configured interval
+        // Periodic WebSocket state push (no polling; HMI gets live updates)
         uint32_t now = millis();
+        if (now - lastWsPush >= WS_STATE_PUSH_INTERVAL_MS) {
+            lastWsPush = now;
+            webServer.broadcastState();
+        }
+
+        // Log sensor data at configured interval
         if (now - lastLogTime >= systemConfig.log_interval_ms) {
             lastLogTime = now;
             logSensorData();
+        }
+
+        // MQTT health heartbeat (Phase C)
+        if (now - lastMqttHealth >= MQTT_HEALTH_INTERVAL_MS) {
+            lastMqttHealth = now;
+            mqttTelemetry.publishHealth(
+                (uint32_t)(now / 1000),
+                ESP.getFreeHeap(),
+                (WiFi.status() == WL_CONNECTED),
+                systemState.active_alarms
+            );
         }
 
         // Wait for next cycle
@@ -475,44 +735,135 @@ void taskLoggingLoop(void* parameter) {
 // CONFIGURATION MANAGEMENT
 // ============================================================================
 
+// Apply defaults for MQTT/telemetry fields only (e.g. after migration from older config)
+static void applyMqttConfigDefaults() {
+    memset(systemConfig.mqtt_host, 0, sizeof(systemConfig.mqtt_host));
+    systemConfig.mqtt_port = MQTT_PORT_DEFAULT;
+    memset(systemConfig.mqtt_user, 0, sizeof(systemConfig.mqtt_user));
+    memset(systemConfig.mqtt_pass, 0, sizeof(systemConfig.mqtt_pass));
+    systemConfig.use_mqtt_telemetry = false;
+}
+
 void loadConfiguration() {
     Serial.println("Loading configuration from NVS...");
 
     preferences.begin(NVS_NAMESPACE, true);  // Read-only
 
-    // Check if config exists
     size_t config_size = preferences.getBytesLength(NVS_KEY_CONFIG);
+
+    if (config_size == 0) {
+        Serial.println("No configuration found - initializing defaults");
+        preferences.end();
+        initializeDefaults();
+        return;
+    }
 
     if (config_size == sizeof(system_config_t)) {
         preferences.getBytes(NVS_KEY_CONFIG, &systemConfig, sizeof(system_config_t));
-
-        // Validate magic number
+        preferences.end();
         if (systemConfig.magic != CONFIG_MAGIC) {
             Serial.println("Invalid config magic - initializing defaults");
             initializeDefaults();
-        } else {
-            Serial.println("Configuration loaded successfully");
+            return;
         }
-    } else {
-        Serial.println("No valid configuration found - initializing defaults");
-        initializeDefaults();
+        // F5: Verify CRC16 to detect NVS corruption
+        uint16_t stored_checksum = systemConfig.checksum;
+        systemConfig.checksum = 0;
+        uint16_t computed = cp_crc16((const uint8_t*)&systemConfig, sizeof(system_config_t));
+        systemConfig.checksum = stored_checksum;
+        if (computed != stored_checksum) {
+            Serial.println("Config checksum mismatch - initializing defaults");
+            initializeDefaults();
+            return;
+        }
+        Serial.println("Configuration loaded successfully");
+        return;
     }
 
+    // Migration: stored config is from older firmware (smaller struct)
+    if (config_size < sizeof(system_config_t)) {
+        memset(&systemConfig, 0, sizeof(system_config_t));
+        preferences.getBytes(NVS_KEY_CONFIG, &systemConfig, config_size);
+        preferences.end();
+        if (systemConfig.magic != CONFIG_MAGIC) {
+            Serial.println("Invalid config magic after migration - initializing defaults");
+            initializeDefaults();
+            return;
+        }
+        // Zero the remainder and set defaults for new MQTT/telemetry fields
+        memset((uint8_t*)&systemConfig + config_size, 0, sizeof(system_config_t) - config_size);
+        applyMqttConfigDefaults();
+        Serial.println("Configuration migrated (older size); MQTT defaults applied");
+        saveConfiguration();
+        return;
+    }
+
+    // Stored blob larger than current struct (e.g. newer firmware was reverted)
+    preferences.getBytes(NVS_KEY_CONFIG, &systemConfig, sizeof(system_config_t));
     preferences.end();
+    if (systemConfig.magic != CONFIG_MAGIC) {
+        Serial.println("Invalid config magic - initializing defaults");
+        initializeDefaults();
+        return;
+    }
+    uint16_t stored_checksum = systemConfig.checksum;
+    systemConfig.checksum = 0;
+    uint16_t computed = cp_crc16((const uint8_t*)&systemConfig, sizeof(system_config_t));
+    systemConfig.checksum = stored_checksum;
+    if (computed != stored_checksum) {
+        Serial.println("Config checksum mismatch (larger blob) - initializing defaults");
+        initializeDefaults();
+        return;
+    }
+    Serial.println("Configuration loaded successfully (truncated from larger blob)");
 }
 
 void saveConfiguration() {
     Serial.println("Saving configuration to NVS...");
 
-    // Update checksum
     systemConfig.magic = CONFIG_MAGIC;
     systemConfig.version = CONFIG_VERSION;
+    // F5: CRC16 over entire config (checksum field zeroed during computation)
+    systemConfig.checksum = 0;
+    systemConfig.checksum = cp_crc16((const uint8_t*)&systemConfig, sizeof(system_config_t));
 
     preferences.begin(NVS_NAMESPACE, false);  // Read-write
     preferences.putBytes(NVS_KEY_CONFIG, &systemConfig, sizeof(system_config_t));
     preferences.end();
 
     Serial.println("Configuration saved");
+}
+
+// API command handler: validate and queue for execution in control task (Modern IoT Stack)
+static bool handleApiCommand(const char* request_id, const char* name, const JsonObject& params, String* outMessage) {
+    if (!request_id || !name || !outMessage) return false;
+
+    if (strcmp(name, "blowdown_start") == 0) {
+        if (blowdownController.isActive()) {
+            *outMessage = "Blowdown already active";
+            return false;
+        }
+        setPendingCommand(request_id, name);
+        return true;
+    }
+    if (strcmp(name, "blowdown_stop") == 0) {
+        setPendingCommand(request_id, name);
+        return true;
+    }
+    if (strcmp(name, "pump_prime") == 0) {
+        int pump = params["pump"] | -1;
+        if (pump < 0 || pump > 2) {
+            *outMessage = "pump index 0-2 required";
+            return false;
+        }
+        uint32_t duration_ms = params["duration_ms"] | 5000;
+        if (duration_ms < 500 || duration_ms > 60000) duration_ms = 5000;
+        setPendingCommand(request_id, name, (int8_t)pump, duration_ms);
+        return true;
+    }
+
+    *outMessage = "Unknown command";
+    return false;
 }
 
 void initializeDefaults() {
@@ -588,9 +939,35 @@ void initializeDefaults() {
     systemConfig.alarms.feed_timeout_enabled = true;
     systemConfig.alarms.sensor_error_enabled = true;
 
+    // Fuzzy logic defaults
+    systemConfig.fuzzy.enabled = false;
+    systemConfig.fuzzy.cond_setpoint = FUZZY_DEFAULT_COND_SETPOINT;
+    systemConfig.fuzzy.alk_setpoint = FUZZY_DEFAULT_ALK_SETPOINT;
+    systemConfig.fuzzy.sulfite_setpoint = FUZZY_DEFAULT_SULFITE_SETPOINT;
+    systemConfig.fuzzy.ph_setpoint = FUZZY_DEFAULT_PH_SETPOINT;
+    systemConfig.fuzzy.cond_deadband = FUZZY_DEFAULT_COND_DEADBAND;
+    systemConfig.fuzzy.alk_deadband = FUZZY_DEFAULT_ALK_DEADBAND;
+    systemConfig.fuzzy.sulfite_deadband = FUZZY_DEFAULT_SULFITE_DEADBAND;
+    systemConfig.fuzzy.ph_deadband = FUZZY_DEFAULT_PH_DEADBAND;
+    systemConfig.fuzzy.blowdown_max_sec = 60.0f;
+    systemConfig.fuzzy.caustic_max_ml_min = 10.0f;
+    systemConfig.fuzzy.sulfite_max_ml_min = 5.0f;
+    systemConfig.fuzzy.acid_max_ml_min = 5.0f;
+    systemConfig.fuzzy.aggressive_mode = false;
+    systemConfig.fuzzy.inference_method = 0;
+    systemConfig.fuzzy.defuzz_method = 0;
+    systemConfig.fuzzy.manual_input_timeout = 1440;  // 24 h in minutes; 0 = never expire
+
     // Network defaults
     systemConfig.tsdb_port = TSDB_HTTP_PORT;
     systemConfig.log_interval_ms = TSDB_LOG_INTERVAL_MS;
+
+    // MQTT telemetry defaults (Modern IoT Stack)
+    memset(systemConfig.mqtt_host, 0, sizeof(systemConfig.mqtt_host));
+    systemConfig.mqtt_port = MQTT_PORT_DEFAULT;
+    memset(systemConfig.mqtt_user, 0, sizeof(systemConfig.mqtt_user));
+    memset(systemConfig.mqtt_pass, 0, sizeof(systemConfig.mqtt_pass));
+    systemConfig.use_mqtt_telemetry = false;   // default legacy HTTP until broker configured
 
     // Security defaults
     systemConfig.access_code = 2222;
@@ -645,13 +1022,25 @@ void checkAlarms() {
         new_alarms |= ALARM_BLOWDOWN_TIMEOUT;
     }
 
-    // Sensor errors (from health monitor, not raw sensor flag)
+    // Sensor errors (from health monitor, or telemetry flags in coprocessor mode)
+#ifdef USE_COPROCESSOR_LINK
+    {
+        const cp_link_telemetry_t& t = coprocessorLink.getLastTelemetry();
+        if (!t.valid || !t.sensor_ok || !sensor_valid) {
+            new_alarms |= ALARM_SENSOR_ERROR;
+        }
+        if (!t.valid || !t.temp_ok) {
+            new_alarms |= ALARM_TEMP_ERROR;
+        }
+    }
+#else
     if (!conductivitySensor.isSensorOK() || !sensor_valid) {
         new_alarms |= ALARM_SENSOR_ERROR;
     }
     if (!conductivitySensor.isTempSensorOK()) {
         new_alarms |= ALARM_TEMP_ERROR;
     }
+#endif
 
     // Stale data alarm
     if (!sensorHealth.isMeasurementFresh()) {
@@ -669,42 +1058,56 @@ void checkAlarms() {
     }
 
     // Blowdown valve fault (4-20mA feedback out of range)
+#ifdef USE_COPROCESSOR_LINK
+    if (coprocessorLink.getLastTelemetry().valid && coprocessorLink.getLastTelemetry().valve_fault) {
+        new_alarms |= ALARM_VALVE_FAULT;
+    }
+#else
     if (blowdownController.isValveFault()) {
         new_alarms |= ALARM_VALVE_FAULT;
     }
+#endif
 
     // --- Rising edge (new alarms) ---
     uint16_t rising_alarms = new_alarms & ~systemState.active_alarms;
 
+    uint32_t ts = dataLogger.getTimestamp();
     if (rising_alarms & ALARM_COND_HIGH) {
         dataLogger.logAlarm(ALARM_COND_HIGH, "HIGH CONDUCTIVITY", true, cond);
+        mqttTelemetry.publishAlarm(ALARM_COND_HIGH, "HIGH CONDUCTIVITY", true, cond, ts);
         display.showAlarm("HIGH CONDUCTIVITY");
     }
     if (rising_alarms & ALARM_COND_LOW) {
         dataLogger.logAlarm(ALARM_COND_LOW, "LOW CONDUCTIVITY", true, cond);
+        mqttTelemetry.publishAlarm(ALARM_COND_LOW, "LOW CONDUCTIVITY", true, cond, ts);
         display.showAlarm("LOW CONDUCTIVITY");
     }
     if (rising_alarms & ALARM_BLOWDOWN_TIMEOUT) {
         dataLogger.logAlarm(ALARM_BLOWDOWN_TIMEOUT, "BLOWDOWN TIMEOUT", true, 0);
+        mqttTelemetry.publishAlarm(ALARM_BLOWDOWN_TIMEOUT, "BLOWDOWN TIMEOUT", true, 0, ts);
         display.showAlarm("BLOWDOWN TIMEOUT");
     }
     if (rising_alarms & ALARM_SENSOR_ERROR) {
         dataLogger.logAlarm(ALARM_SENSOR_ERROR, "SENSOR ERROR", true, 0);
+        mqttTelemetry.publishAlarm(ALARM_SENSOR_ERROR, "SENSOR ERROR", true, 0, ts);
         display.showAlarm("SENSOR ERROR");
     }
     if (rising_alarms & ALARM_VALVE_FAULT) {
         dataLogger.logAlarm(ALARM_VALVE_FAULT, "VALVE FAULT",
                             true, blowdownController.getFeedbackmA());
+        mqttTelemetry.publishAlarm(ALARM_VALVE_FAULT, "VALVE FAULT", true, blowdownController.getFeedbackmA(), ts);
         display.showAlarm("VALVE FAULT");
     }
     if (rising_alarms & ALARM_STALE_DATA) {
         dataLogger.logAlarm(ALARM_STALE_DATA, "STALE DATA", true,
                             (float)sensorHealth.getMeasurementAge());
+        mqttTelemetry.publishAlarm(ALARM_STALE_DATA, "STALE DATA", true, (float)sensorHealth.getMeasurementAge(), ts);
         display.showAlarm("STALE DATA");
     }
     if (rising_alarms & ALARM_SAFE_MODE) {
         dataLogger.logAlarm(ALARM_SAFE_MODE, "SAFE MODE", true,
                             (float)sensorHealth.getSafeMode());
+        mqttTelemetry.publishAlarm(ALARM_SAFE_MODE, "SAFE MODE", true, (float)sensorHealth.getSafeMode(), ts);
         display.showAlarm("SAFE MODE");
     }
 
@@ -713,24 +1116,31 @@ void checkAlarms() {
 
     if (falling_alarms & ALARM_COND_HIGH) {
         dataLogger.logAlarm(ALARM_COND_HIGH, "HIGH CONDUCTIVITY", false, cond);
+        mqttTelemetry.publishAlarm(ALARM_COND_HIGH, "HIGH CONDUCTIVITY", false, cond, ts);
     }
     if (falling_alarms & ALARM_COND_LOW) {
         dataLogger.logAlarm(ALARM_COND_LOW, "LOW CONDUCTIVITY", false, cond);
+        mqttTelemetry.publishAlarm(ALARM_COND_LOW, "LOW CONDUCTIVITY", false, cond, ts);
     }
     if (falling_alarms & ALARM_BLOWDOWN_TIMEOUT) {
         dataLogger.logAlarm(ALARM_BLOWDOWN_TIMEOUT, "BLOWDOWN TIMEOUT", false, 0);
+        mqttTelemetry.publishAlarm(ALARM_BLOWDOWN_TIMEOUT, "BLOWDOWN TIMEOUT", false, 0, ts);
     }
     if (falling_alarms & ALARM_SENSOR_ERROR) {
         dataLogger.logAlarm(ALARM_SENSOR_ERROR, "SENSOR ERROR", false, 0);
+        mqttTelemetry.publishAlarm(ALARM_SENSOR_ERROR, "SENSOR ERROR", false, 0, ts);
     }
     if (falling_alarms & ALARM_VALVE_FAULT) {
         dataLogger.logAlarm(ALARM_VALVE_FAULT, "VALVE FAULT", false, 0);
+        mqttTelemetry.publishAlarm(ALARM_VALVE_FAULT, "VALVE FAULT", false, 0, ts);
     }
     if (falling_alarms & ALARM_STALE_DATA) {
         dataLogger.logAlarm(ALARM_STALE_DATA, "STALE DATA", false, 0);
+        mqttTelemetry.publishAlarm(ALARM_STALE_DATA, "STALE DATA", false, 0, ts);
     }
     if (falling_alarms & ALARM_SAFE_MODE) {
         dataLogger.logAlarm(ALARM_SAFE_MODE, "SAFE MODE", false, 0);
+        mqttTelemetry.publishAlarm(ALARM_SAFE_MODE, "SAFE MODE", false, 0, ts);
     }
 
     if (falling_alarms) {
@@ -762,7 +1172,7 @@ void processInputs() {
     // For now, stub: display.nextScreen() / display.prevScreen()
     // will be driven by the encoder callback.
 
-    // --- Encoder push button (GPIO0, active LOW) ---
+    // --- Encoder push button (ENCODER_BUTTON_PIN, active LOW) ---
     bool btn = digitalRead(ENCODER_BUTTON_PIN);
 
     // Debounce
@@ -831,6 +1241,9 @@ void logSensorData() {
     // Log to TimescaleDB (via WiFi) and/or RAM buffer
     dataLogger.logReading(&reading);
 
+    // MQTT telemetry (Phase C): publish to device/{id}/metrics or buffer if offline
+    mqttTelemetry.publishReading(&reading);
+
     // Log to SD card (always-on local storage)
     sdLogger.logReading(&reading);
 }
@@ -863,6 +1276,8 @@ void updateFeedwaterPumpMonitor() {
             Serial.printf("[FW PUMP] ON  — cycle #%u\n", systemState.fw_pump_cycle_count);
             dataLogger.logEvent("FW_PUMP_ON", "Feedwater pump started",
                                 systemState.fw_pump_cycle_count);
+            mqttTelemetry.publishEvent("FW_PUMP_ON", "Feedwater pump started",
+                                      systemState.fw_pump_cycle_count, dataLogger.getTimestamp());
             sdLogger.logEvent("FW_PUMP_ON", "Feedwater pump started",
                               systemState.fw_pump_cycle_count);
         }
@@ -880,6 +1295,7 @@ void updateFeedwaterPumpMonitor() {
                           cycle_sec, systemState.fw_pump_on_time_sec,
                           systemState.fw_pump_cycle_count);
             dataLogger.logEvent("FW_PUMP_OFF", "Feedwater pump stopped", cycle_sec);
+            mqttTelemetry.publishEvent("FW_PUMP_OFF", "Feedwater pump stopped", cycle_sec, dataLogger.getTimestamp());
             sdLogger.logEvent("FW_PUMP_OFF", "Feedwater pump stopped", cycle_sec);
         }
 

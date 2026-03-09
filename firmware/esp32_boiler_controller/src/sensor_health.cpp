@@ -19,6 +19,7 @@ SensorHealthMonitor::SensorHealthMonitor()
     , _safe_mode(SAFE_MODE_NONE)
     , _safe_mode_enter_time(0)
     , _last_i2c_recovery_time(0)
+    , _comms_lost(false)
 {
     initHealth(&_cond_health);
     initHealth(&_temp_health);
@@ -50,6 +51,7 @@ void SensorHealthMonitor::begin() {
     initHealth(&_feedback_health);
 
     _safe_mode = SAFE_MODE_NONE;
+    _comms_lost = false;
 
     Serial.println("SensorHealthMonitor initialized");
 }
@@ -203,7 +205,15 @@ const char* SensorHealthMonitor::getSafeModeString() {
         case SAFE_MODE_BUS_FAIL:         return "BUS FAIL";
         case SAFE_MODE_WATCHDOG_RESTART: return "WDT RESTART";
         case SAFE_MODE_CRITICAL_FAULT:   return "CRITICAL";
+        case SAFE_MODE_COMMS_LOST:       return "COMMS LOST";
         default:                         return "UNKNOWN";
+    }
+}
+
+void SensorHealthMonitor::reportCommsLost(bool lost) {
+    _comms_lost = lost;
+    if (lost) {
+        enterSafeMode(SAFE_MODE_COMMS_LOST);
     }
 }
 
@@ -326,11 +336,15 @@ void SensorHealthMonitor::checkStaleness() {
 void SensorHealthMonitor::evaluateSafeMode() {
     // Already in safe mode — check if we can auto-exit
     if (_safe_mode != SAFE_MODE_NONE) {
-        // Auto-exit if all required sensors recovered
-        bool cond_ok = isConductivityValid() || !deviceManager.isEnabled(DEV_CONDUCTIVITY_PROBE);
-        bool meas_ok = isMeasurementFresh();
-
-        if (cond_ok && meas_ok) {
+        bool can_exit = false;
+        if (_safe_mode == SAFE_MODE_COMMS_LOST) {
+            can_exit = !_comms_lost;
+        } else {
+            bool cond_ok = isConductivityValid() || !deviceManager.isEnabled(DEV_CONDUCTIVITY_PROBE);
+            bool meas_ok = isMeasurementFresh();
+            can_exit = cond_ok && meas_ok;
+        }
+        if (can_exit) {
             uint32_t hold_time = millis() - _safe_mode_enter_time;
             if (hold_time >= HEALTH_SAFE_MODE_HOLD_MS) {
                 Serial.println("SensorHealth: Auto-exiting safe mode — sensors recovered");

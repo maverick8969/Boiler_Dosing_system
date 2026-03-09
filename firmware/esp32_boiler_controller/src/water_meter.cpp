@@ -13,6 +13,8 @@ WaterMeterManager waterMeterManager;
 // Static ISR data
 static volatile uint32_t meter_pulse_counts[2] = {0, 0};
 static volatile uint32_t meter_last_pulse_times[2] = {0, 0};
+static volatile uint32_t meter_last_rising_ms[2] = {0, 0};
+static const uint8_t s_meter_pins[2] = {(uint8_t)WATER_METER_PIN, (uint8_t)WATER_METER_2_PIN};
 
 // ============================================================================
 // WATER METER IMPLEMENTATION
@@ -29,6 +31,7 @@ WaterMeter::WaterMeter(uint8_t pin, uint8_t meter_id)
     , _flow_rate(0)
     , _last_query_pulse_count(0)
     , _last_query_volume(0)
+    , _last_update_volume(0)
     , _debounce_time(WATER_METER_DEBOUNCE_MS)
 {
 }
@@ -37,9 +40,9 @@ bool WaterMeter::begin() {
     // Configure pin with internal pull-up
     pinMode(_pin, INPUT_PULLUP);
 
-    // Attach interrupt
+    // Attach interrupt (CHANGE so we can record RISING and only count FALLING after min HIGH time)
     attachInterruptArg(digitalPinToInterrupt(_pin), handleInterrupt,
-                       (void*)(intptr_t)_meter_id, FALLING);
+                       (void*)(intptr_t)_meter_id, CHANGE);
 
     Serial.printf("Water Meter %d initialized on pin %d\n", _meter_id, _pin);
     return true;
@@ -49,10 +52,11 @@ void WaterMeter::configure(water_meter_config_t* config) {
     _config = config;
 
     if (_config) {
-        // Load totalizer from config
+        // Load totalizer from config (persisted value)
         _pulse_count = 0;  // Pulses since boot
         _last_query_pulse_count = 0;
         _last_query_volume = 0;
+        _last_update_volume = 0;
     }
 }
 
@@ -81,16 +85,18 @@ void WaterMeter::update() {
         _last_flow_calc_time = now;
     }
 
-    // Update totalizer
+    // Update totalizer (independent of getVolumeSinceLast)
     if (_config) {
         float current_volume = pulsesToVolume(_pulse_count);
-        uint32_t volume_delta = (uint32_t)(current_volume - _last_query_volume);
-        _config->totalizer += volume_delta;
-
-        // Wrap at maximum
-        if (_config->totalizer > METER_TOTALIZER_MAX) {
-            _config->totalizer = 0;
+        float volume_delta = current_volume - _last_update_volume;
+        if (volume_delta > 0) {
+            _config->totalizer += (uint32_t)volume_delta;
+            // Wrap at maximum
+            if (_config->totalizer > METER_TOTALIZER_MAX) {
+                _config->totalizer = 0;
+            }
         }
+        _last_update_volume = current_volume;
     }
 }
 
@@ -133,6 +139,7 @@ void WaterMeter::resetTotal() {
     _pulse_count = 0;
     _last_query_pulse_count = 0;
     _last_query_volume = 0;
+    _last_update_volume = 0;
     _last_flow_pulse_count = 0;
 }
 
@@ -179,9 +186,18 @@ void IRAM_ATTR WaterMeter::handleInterrupt(void* arg) {
     if (meter_id >= 2) return;
 
     uint32_t now = millis();
+    int level = digitalRead(s_meter_pins[meter_id]);
 
-    // Simple debounce
-    if (now - meter_last_pulse_times[meter_id] >= WATER_METER_DEBOUNCE_MS) {
+    if (level == HIGH) {
+        meter_last_rising_ms[meter_id] = now;
+        return;
+    }
+
+    // LOW: potential pulse — count only if debounce and "contact was open" (min HIGH time)
+    bool debounce_ok = (now - meter_last_pulse_times[meter_id] >= WATER_METER_DEBOUNCE_MS);
+    bool min_high_ok = (meter_last_rising_ms[meter_id] == 0) ||
+                       (now - meter_last_rising_ms[meter_id] >= WATER_METER_MIN_HIGH_MS);
+    if (debounce_ok && min_high_ok) {
         meter_pulse_counts[meter_id]++;
         meter_last_pulse_times[meter_id] = now;
     }
@@ -211,8 +227,8 @@ float WaterMeter::pulsesToVolume(uint32_t pulses) {
 
 WaterMeterManager::WaterMeterManager() {
     _meters[0] = new WaterMeter(WATER_METER_PIN, 0);
-    // Second meter on different pin if available
-    _meters[1] = new WaterMeter(GPIO_NUM_19, 1);  // GPIO19 free; WM2 disabled by default
+    // WM2 on WATER_METER_2_PIN (GPIO17). Do not use GPIO19 — reserved for SD_CS.
+    _meters[1] = new WaterMeter(WATER_METER_2_PIN, 1);
 }
 
 bool WaterMeterManager::begin() {
