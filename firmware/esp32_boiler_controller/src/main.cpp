@@ -78,6 +78,9 @@ Preferences preferences;
 // SPI bus mutex (shared VSPI: MAX31865 + SD card)
 SemaphoreHandle_t spiMutex = NULL;
 
+// Config mutex: protects systemConfig when web server or main write to it
+SemaphoreHandle_t configMutex = NULL;
+
 // Task handles for FreeRTOS
 TaskHandle_t taskControl = NULL;
 TaskHandle_t taskMeasurement = NULL;
@@ -169,6 +172,11 @@ void setup() {
     // Load configuration from NVS
     loadConfiguration();
 
+    configMutex = xSemaphoreCreateMutex();
+    if (configMutex == NULL) {
+        Serial.println("WARNING: Config mutex creation failed");
+    }
+
     // Initialize device manager (uses enabled_devices from config)
     deviceManager.begin(&systemConfig.enabled_devices);
 
@@ -254,7 +262,7 @@ void setup() {
     }
 
     // Web server (accessible via AP hotspot at 192.168.4.1 and via STA IP)
-    if (webServer.begin(&systemConfig, &fuzzyController)) {
+    if (webServer.begin(&systemConfig, &fuzzyController, configMutex)) {
         webServer.setCommandHandler(handleApiCommand);
 #if defined(DEBUG_MODE) || (CORE_DEBUG_LEVEL >= 3)
         Serial.printf("Web UI: http://%s/ (AP) or http://%s/ (STA)\n",
@@ -291,12 +299,15 @@ void setup() {
     systemState.fw_pump_last_on_time = 0;
 
     // Load feedwater pump totals from NVS
-    preferences.begin(NVS_NAMESPACE, true);
-    systemState.fw_pump_cycle_count = preferences.getUInt(NVS_KEY_FW_PUMP_CYCLES, 0);
-    systemState.fw_pump_on_time_sec = preferences.getUInt(NVS_KEY_FW_PUMP_ONTIME, 0);
-    preferences.end();
-    Serial.printf("Feedwater pump totals loaded: %u cycles, %u sec on-time\n",
-                  systemState.fw_pump_cycle_count, systemState.fw_pump_on_time_sec);
+    if (preferences.begin(NVS_NAMESPACE, true)) {
+        systemState.fw_pump_cycle_count = preferences.getUInt(NVS_KEY_FW_PUMP_CYCLES, 0);
+        systemState.fw_pump_on_time_sec = preferences.getUInt(NVS_KEY_FW_PUMP_ONTIME, 0);
+        preferences.end();
+        Serial.printf("Feedwater pump totals loaded: %u cycles, %u sec on-time\n",
+                      systemState.fw_pump_cycle_count, systemState.fw_pump_on_time_sec);
+    } else {
+        Serial.println("NVS begin failed - feedwater pump totals use defaults (0)");
+    }
 
     // Initialize auxiliary inputs
     pinMode(AUX_INPUT1_PIN, INPUT_PULLUP);
@@ -747,7 +758,13 @@ static void applyMqttConfigDefaults() {
 void loadConfiguration() {
     Serial.println("Loading configuration from NVS...");
 
-    preferences.begin(NVS_NAMESPACE, true);  // Read-only
+    if (!preferences.begin(NVS_NAMESPACE, true)) {  // Read-only
+        Serial.println("NVS begin failed (read) - using defaults and attempting save");
+        preferences.end();
+        initializeDefaults();
+        saveConfiguration();
+        return;
+    }
 
     size_t config_size = preferences.getBytesLength(NVS_KEY_CONFIG);
 
@@ -755,6 +772,7 @@ void loadConfiguration() {
         Serial.println("No configuration found - initializing defaults");
         preferences.end();
         initializeDefaults();
+        saveConfiguration();  // Persist defaults so next boot has valid config
         return;
     }
 
@@ -764,6 +782,7 @@ void loadConfiguration() {
         if (systemConfig.magic != CONFIG_MAGIC) {
             Serial.println("Invalid config magic - initializing defaults");
             initializeDefaults();
+            saveConfiguration();  // Overwrite corrupt NVS so device recovers on next boot
             return;
         }
         // F5: Verify CRC16 to detect NVS corruption
@@ -774,6 +793,7 @@ void loadConfiguration() {
         if (computed != stored_checksum) {
             Serial.println("Config checksum mismatch - initializing defaults");
             initializeDefaults();
+            saveConfiguration();  // Overwrite corrupt NVS so device recovers on next boot
             return;
         }
         Serial.println("Configuration loaded successfully");
@@ -788,6 +808,7 @@ void loadConfiguration() {
         if (systemConfig.magic != CONFIG_MAGIC) {
             Serial.println("Invalid config magic after migration - initializing defaults");
             initializeDefaults();
+            saveConfiguration();  // Overwrite corrupt NVS so device recovers on next boot
             return;
         }
         // Zero the remainder and set defaults for new MQTT/telemetry fields
@@ -804,6 +825,7 @@ void loadConfiguration() {
     if (systemConfig.magic != CONFIG_MAGIC) {
         Serial.println("Invalid config magic - initializing defaults");
         initializeDefaults();
+        saveConfiguration();  // Overwrite corrupt NVS so device recovers on next boot
         return;
     }
     uint16_t stored_checksum = systemConfig.checksum;
@@ -813,12 +835,18 @@ void loadConfiguration() {
     if (computed != stored_checksum) {
         Serial.println("Config checksum mismatch (larger blob) - initializing defaults");
         initializeDefaults();
+        saveConfiguration();  // Overwrite corrupt NVS so device recovers on next boot
         return;
     }
     Serial.println("Configuration loaded successfully (truncated from larger blob)");
 }
 
 void saveConfiguration() {
+    if (configMutex != NULL && xSemaphoreTake(configMutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        Serial.println("saveConfiguration: could not take config mutex");
+        return;
+    }
+
     Serial.println("Saving configuration to NVS...");
 
     systemConfig.magic = CONFIG_MAGIC;
@@ -827,10 +855,15 @@ void saveConfiguration() {
     systemConfig.checksum = 0;
     systemConfig.checksum = cp_crc16((const uint8_t*)&systemConfig, sizeof(system_config_t));
 
-    preferences.begin(NVS_NAMESPACE, false);  // Read-write
+    if (!preferences.begin(NVS_NAMESPACE, false)) {  // Read-write
+        Serial.println("NVS begin failed (write) - configuration not persisted");
+        if (configMutex != NULL) xSemaphoreGive(configMutex);
+        return;
+    }
     preferences.putBytes(NVS_KEY_CONFIG, &systemConfig, sizeof(system_config_t));
     preferences.end();
 
+    if (configMutex != NULL) xSemaphoreGive(configMutex);
     Serial.println("Configuration saved");
 }
 
@@ -1315,7 +1348,10 @@ void updateFeedwaterPumpMonitor() {
 }
 
 void saveFeedwaterPumpNVS() {
-    preferences.begin(NVS_NAMESPACE, false);
+    if (!preferences.begin(NVS_NAMESPACE, false)) {
+        Serial.println("NVS begin failed - feedwater pump totals not persisted");
+        return;
+    }
     preferences.putUInt(NVS_KEY_FW_PUMP_CYCLES, systemState.fw_pump_cycle_count);
     preferences.putUInt(NVS_KEY_FW_PUMP_ONTIME, systemState.fw_pump_on_time_sec);
     preferences.end();
