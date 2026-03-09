@@ -400,6 +400,13 @@ void loop() {
 // FREERTOS TASKS
 // ============================================================================
 
+/**
+ * @brief Core control loop (runs on Core 1)
+ * 
+ * Main automation logic loop. Processes sensor health, coprocessor telemetry,
+ * evaluates safe mode, updates blowdown valve state based on conductivity,
+ * evaluates fuzzy logic for chemical pumps, and updates water meter feed modes.
+ */
 void taskControlLoop(void* parameter) {
     esp_task_wdt_add(NULL);  // Subscribe this task to watchdog
     TickType_t lastWakeTime = xTaskGetTickCount();
@@ -617,6 +624,12 @@ void taskControlLoop(void* parameter) {
     }
 }
 
+/**
+ * @brief Measurement loop (runs on Core 1)
+ * 
+ * Manages rapid reading of local sensors (if used) and updates 
+ * water meter states to capture fast pulses.
+ */
 void taskMeasurementLoop(void* parameter) {
     esp_task_wdt_add(NULL);  // Subscribe this task to watchdog
     TickType_t lastWakeTime = xTaskGetTickCount();
@@ -665,6 +678,11 @@ void taskMeasurementLoop(void* parameter) {
     }
 }
 
+/**
+ * @brief Display loop (runs on Core 0)
+ * 
+ * Periodically refreshes the LCD UI to show current system state.
+ */
 void taskDisplayLoop(void* parameter) {
     esp_task_wdt_add(NULL);  // Subscribe this task to watchdog
     TickType_t lastWakeTime = xTaskGetTickCount();
@@ -683,6 +701,12 @@ void taskDisplayLoop(void* parameter) {
 #define WS_STATE_PUSH_INTERVAL_MS  2000   // Push state to WebSocket clients every 2 s (Modern IoT Stack)
 #define MQTT_HEALTH_INTERVAL_MS    60000  // Publish MQTT health every 60 s (Phase C)
 
+/**
+ * @brief Logging and network loop (runs on Core 0)
+ * 
+ * Manages WiFi and TimescaleDB data pushes, SD card flushes, 
+ * WebServer API handling, WebSocket state broadcasts, and MQTT telemetry.
+ */
 void taskLoggingLoop(void* parameter) {
     esp_task_wdt_add(NULL);  // Subscribe this task to watchdog
     TickType_t lastWakeTime = xTaskGetTickCount();
@@ -755,6 +779,12 @@ static void applyMqttConfigDefaults() {
     systemConfig.use_mqtt_telemetry = false;
 }
 
+/**
+ * @brief Loads the system configuration from Non-Volatile Storage (NVS)
+ * 
+ * Handles config migrations and validates data integrity via CRC16.
+ * Fallbacks to defaults if corruption or version mismatch is detected.
+ */
 void loadConfiguration() {
     Serial.println("Loading configuration from NVS...");
 
@@ -841,6 +871,12 @@ void loadConfiguration() {
     Serial.println("Configuration loaded successfully (truncated from larger blob)");
 }
 
+/**
+ * @brief Saves the current system configuration to Non-Volatile Storage (NVS)
+ * 
+ * Secures concurrent access via configMutex. Computes and saves a new CRC16
+ * to ensure integrity across reboots.
+ */
 void saveConfiguration() {
     if (configMutex != NULL && xSemaphoreTake(configMutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
         Serial.println("saveConfiguration: could not take config mutex");
@@ -867,7 +903,12 @@ void saveConfiguration() {
     Serial.println("Configuration saved");
 }
 
-// API command handler: validate and queue for execution in control task (Modern IoT Stack)
+/**
+ * @brief API command handler from WebServer UI (Modern IoT Stack)
+ * 
+ * Validates incoming HTTP/WebSocket commands and queues them for execution 
+ * in the main control task to maintain thread safety.
+ */
 static bool handleApiCommand(const char* request_id, const char* name, const JsonObject& params, String* outMessage) {
     if (!request_id || !name || !outMessage) return false;
 
@@ -899,6 +940,11 @@ static bool handleApiCommand(const char* request_id, const char* name, const Jso
     return false;
 }
 
+/**
+ * @brief Initializes all system configurations to known safe factory defaults.
+ * 
+ * Used on first boot, or if NVS data is corrupt/invalid.
+ */
 void initializeDefaults() {
     memset(&systemConfig, 0, sizeof(system_config_t));
 
@@ -1021,6 +1067,13 @@ void initializeDefaults() {
 // ALARM PROCESSING
 // ============================================================================
 
+/**
+ * @brief Checks sensor data and system states against configured alarm thresholds
+ * 
+ * Sets systemState active alarms, triggers display popups, logs to TimescaleDB,
+ * and publishes to MQTT. Includes hysteresis or threshold testing based on user 
+ * selected percentage/absolute limits.
+ */
 void checkAlarms() {
     uint16_t new_alarms = ALARM_NONE;
     float cond = systemState.conductivity_calibrated;
